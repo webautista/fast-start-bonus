@@ -1,9 +1,9 @@
 /*
-    Validation script for dbo.FSBTrackings_Load dynamic FSB tracking classification.
+    Validation script for dbo.FSBTrackings_Load dynamic FSB classification.
 
     Purpose:
     1. Recalculate expected FSBTrackings rows for a Promotion/Sponsor scope.
-    2. Compare expected tracking rows, including partial non-commission windows, vs dbo.FSBTrackings after dbo.FSBTrackings_Load runs.
+    2. Compare expected rows vs dbo.FSBTrackings after dbo.FSBTrackings_Load runs.
     3. Report missing promoters/orders, extra rows, date mismatches, duplicates and rule violations.
 
     Usage:
@@ -13,7 +13,7 @@
 
 SET NOCOUNT ON;
 
-DECLARE @PromotionID BIGINT;
+DECLARE @PromotionID BIGINT = 1;
 DECLARE @SponsorID BIGINT = NULL; -- set a SponsorID to validate a single sponsor
 
 -- Example:
@@ -352,7 +352,12 @@ ON #V_FSB1ExtQualified
 
 SELECT ext.*
 INTO #V_FSB1ExtRows
-FROM #V_FSB1ExtWindowRows ext;
+FROM #V_FSB1ExtWindowRows ext
+INNER JOIN #V_FSB1ExtQualified q
+    ON q.PromotionID = ext.PromotionID
+   AND q.SponsorID = ext.SponsorID
+   AND q.SponsorFSB1Start = ext.SponsorFSB1Start
+WHERE ext.FSB1ExtRank <= 2;
 
 CREATE CLUSTERED INDEX CX_V_FSB1ExtRows
 ON #V_FSB1ExtRows
@@ -472,13 +477,11 @@ ON #V_FSB2Qualified
 SELECT f2.*
 INTO #V_FSB2Rows
 FROM #V_FSB2WindowRows f2
-LEFT JOIN #V_FSB2Qualified q
+INNER JOIN #V_FSB2Qualified q
     ON q.PromotionID = f2.PromotionID
    AND q.SponsorID = f2.SponsorID
    AND q.SponsorFSB1Start = f2.SponsorFSB1Start
-WHERE
-      (q.PromotionID IS NOT NULL AND f2.FSB2Rank <= 2)
-   OR (q.PromotionID IS NULL);
+WHERE f2.FSB2Rank <= 2;
 
 CREATE CLUSTERED INDEX CX_V_FSB2Rows
 ON #V_FSB2Rows
@@ -584,7 +587,12 @@ ON #V_FSB3Qualified
 
 SELECT f3.*
 INTO #V_FSB3Rows
-FROM #V_FSB3WindowRows f3;
+FROM #V_FSB3WindowRows f3
+INNER JOIN #V_FSB3Qualified q
+    ON q.PromotionID = f3.PromotionID
+   AND q.SponsorID = f3.SponsorID
+   AND q.SponsorFSB1Start = f3.SponsorFSB1Start
+WHERE f3.FSB3Rank <= 2;
 
 CREATE CLUSTERED INDEX CX_V_FSB3Rows
 ON #V_FSB3Rows
@@ -658,14 +666,14 @@ SELECT
     extRows.OrderDate,
     'FSB1_EXT' AS FSBType,
     extRows.SponsorFSB1Start,
-    ISNULL(f1Ext.FSB1EndDate, extRows.SponsorFSB1MaxEnd) AS SponsorFSB1End,
-    extRows.SponsorFSB1ExtMaxEnd AS SponsorFSB1ExtEnd,
+    f1Ext.FSB1EndDate AS SponsorFSB1End,
+    f1Ext.SponsorFSB1ExtEnd AS SponsorFSB1ExtEnd,
     NULL AS SponsorFSB2Start,
     NULL AS SponsorFSB2End,
     NULL AS SponsorFSB3Start,
     NULL AS SponsorFSB3End
 FROM #V_FSB1ExtRows extRows
-LEFT JOIN #V_FSB1ExtQualified f1Ext
+INNER JOIN #V_FSB1ExtQualified f1Ext
     ON f1Ext.PromotionID = extRows.PromotionID
    AND f1Ext.SponsorID = extRows.SponsorID
    AND f1Ext.SponsorFSB1Start = extRows.SponsorFSB1Start;
@@ -690,7 +698,7 @@ INNER JOIN #V_FSB1Completion f1
     ON f1.PromotionID = f2Rows.PromotionID
    AND f1.SponsorID = f2Rows.SponsorID
    AND f1.SponsorFSB1Start = f2Rows.SponsorFSB1Start
-LEFT JOIN #V_FSB2Qualified f2
+INNER JOIN #V_FSB2Qualified f2
     ON f2.PromotionID = f2Rows.PromotionID
    AND f2.SponsorID = f2Rows.SponsorID
    AND f2.SponsorFSB1Start = f2Rows.SponsorFSB1Start
@@ -723,7 +731,7 @@ INNER JOIN #V_FSB2Qualified f2
     ON f2.PromotionID = f3Rows.PromotionID
    AND f2.SponsorID = f3Rows.SponsorID
    AND f2.SponsorFSB1Start = f3Rows.SponsorFSB1Start
-LEFT JOIN #V_FSB3Qualified f3
+INNER JOIN #V_FSB3Qualified f3
     ON f3.PromotionID = f3Rows.PromotionID
    AND f3.SponsorID = f3Rows.SponsorID
    AND f3.SponsorFSB1Start = f3Rows.SponsorFSB1Start;
@@ -985,24 +993,21 @@ ORDER BY
 -- 14. Rule checks on actual dbo.FSBTrackings.
 -------------------------------------------------------------------------------
 
--- Informational: number of tracking rows per sponsor/cycle/type.
--- Counts can be 1+ because dbo.FSBTrackings now stores partial windows and,
--- for FSB1_EXT/FSB3, all valid orders inside the evaluated window. Commission
--- generation applies the >= 2 promoter rule.
+-- A completed FSB window should have exactly 2 tracking rows.
 SELECT
-    'TRACKING_GROUP_COUNTS' AS Info,
+    'FSB_TYPE_COUNT_NOT_EQUAL_2' AS Issue,
     PromotionID,
     SponsorID,
     SponsorFSB1Start,
     FSBType,
-    COUNT(*) AS ActualRows,
-    CASE WHEN COUNT(DISTINCT PromoterID) >= 2 THEN 1 ELSE 0 END AS HasAtLeast2Promoters
+    COUNT(*) AS ActualRows
 FROM #V_Actual
 GROUP BY
     PromotionID,
     SponsorID,
     SponsorFSB1Start,
     FSBType
+HAVING COUNT(*) <> 2
 ORDER BY
     SponsorID,
     SponsorFSB1Start,

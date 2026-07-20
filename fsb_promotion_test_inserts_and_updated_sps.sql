@@ -164,9 +164,20 @@ EXEC dbo.FSBCommission_TrackingReport @SponsorID = 323861;
 GO
 */
 
+TrackingFastStartBonus/TLTravels
+
+
+Username ishiharu
+Username yellowhead
+Username ksj0301
+Username natasatravel
+Username 3goodtime
 
 select u.Email, u.UserName, p.* from promoters p inner join dbo.UserProfile u on p.UserProfileId = u.UserId
-where username in ('trixiecreates','nickbramble') or userid = 660959
+where username in (
+--'trixiecreates','nickbramble','TLTravels')
+'3goodtime','natasatravel','ksj0301','yellowhead','ishiharu') 
+or userid = 660959
 
 --select u.UserProfileid = 648007
 select * from dbo.Product where ProductID in (4,19,22)
@@ -179,7 +190,18 @@ truncate table dbo.FSBCommission;
 truncate table dbo.FSBCommissionDetail;
 
 -- order by SponsorFSB1Start asc
-select * from dbo.FSBTrackings  where SponsorID = 327259;
+
+
+select u.Email, u.UserName, p.promoterid, p.SponsorID, us.Email, us.UserName, s.FSB1StartDate, DATEADD(DAY, 21, s.FSB1StartDate) FSB_END_WINDOWS from promoters p 
+inner join promoters s on p.SponsorId = s.PromoterId
+inner join dbo.UserProfile us on s.UserProfileId = us.UserId and us.username = '3goodtime'
+inner join dbo.UserProfile u on p.UserProfileId = u.UserId
+
+
+
+where SponsorId = 326851 and EnrollDate between '2026-01-03' and '2026-01-24'
+
+select * from dbo.FSBTrackings  where SponsorID = 326851;
 select o.* from dbo.[Order] o inner join dbo.FSBTrackings t on o.OrderId = t.OrderID where SponsorID = 327259;
 select rph.* from dbo.RecurringPaymentsHistory rph inner join dbo.FSBTrackings t on rph.OrderId = t.OrderID where SponsorID = 327259;
 select * from dbo.FSBCommission where SponsorID = 327259;
