@@ -269,6 +269,79 @@ BEGIN
                         sr.FSBTrackingID
                 ) AS FSBDisplayRank
             FROM ScreenRows sr
+        ),
+
+        ProjectedScreenRows AS
+        (
+            SELECT
+                rsr.*,
+
+                rsr.FSB1StartDate AS ProjectedFSB1StartDate,
+
+                COALESCE
+                (
+                    rsr.FSB1EndDate,
+                    DATEADD(DAY, 7, rsr.SponsorFSB1Start)
+                ) AS ProjectedFSB1EndDate,
+
+                COALESCE
+                (
+                    rsr.FSB1EndDate,
+                    DATEADD(DAY, 7, rsr.SponsorFSB1Start)
+                ) AS ProjectedFSB1ExtStartDate,
+
+                COALESCE
+                (
+                    rsr.FSB1ExtEndDate,
+                    DATEADD(DAY, 14, rsr.SponsorFSB1Start)
+                ) AS ProjectedFSB1ExtEndDate,
+
+                COALESCE
+                (
+                    rsr.FSB2StartDate,
+                    rsr.FSB1EndDate,
+                    DATEADD(DAY, 7, rsr.SponsorFSB1Start)
+                ) AS ProjectedFSB2StartDate,
+
+                COALESCE
+                (
+                    rsr.FSB2EndDate,
+                    DATEADD
+                    (
+                        DAY,
+                        7,
+                        COALESCE
+                        (
+                            rsr.FSB2StartDate,
+                            rsr.FSB1EndDate,
+                            DATEADD(DAY, 7, rsr.SponsorFSB1Start)
+                        )
+                    )
+                ) AS ProjectedFSB2EndDate,
+
+                COALESCE
+                (
+                    rsr.FSB3StartDate,
+                    rsr.FSB2EndDate,
+                    DATEADD(DAY, 14, rsr.SponsorFSB1Start)
+                ) AS ProjectedFSB3StartDate,
+
+                COALESCE
+                (
+                    rsr.FSB3EndDate,
+                    DATEADD
+                    (
+                        DAY,
+                        7,
+                        COALESCE
+                        (
+                            rsr.FSB3StartDate,
+                            rsr.FSB2EndDate,
+                            DATEADD(DAY, 14, rsr.SponsorFSB1Start)
+                        )
+                    )
+                ) AS ProjectedFSB3EndDate
+            FROM RankedScreenRows rsr
         )
 
         SELECT
@@ -276,17 +349,17 @@ BEGIN
             SponsorID,
             SponsorFSB1Start,
 
-            FSB1StartDate,
-            FSB1EndDate,
+            ProjectedFSB1StartDate AS FSB1StartDate,
+            ProjectedFSB1EndDate AS FSB1EndDate,
 
-            FSB1ExtStartDate,
-            FSB1ExtEndDate,
+            ProjectedFSB1ExtStartDate AS FSB1ExtStartDate,
+            ProjectedFSB1ExtEndDate AS FSB1ExtEndDate,
 
-            FSB2StartDate,
-            FSB2EndDate,
+            ProjectedFSB2StartDate AS FSB2StartDate,
+            ProjectedFSB2EndDate AS FSB2EndDate,
 
-            FSB3StartDate,
-            FSB3EndDate,
+            ProjectedFSB3StartDate AS FSB3StartDate,
+            ProjectedFSB3EndDate AS FSB3EndDate,
 
             TrackingFSBType AS FSB,
 
@@ -302,6 +375,7 @@ BEGIN
 
             PromoterID,
             UserProfileID,
+            UserName,
 
             COALESCE
             (
@@ -435,7 +509,7 @@ BEGIN
             END AS StatusText
 
         INTO #ScreenRows
-        FROM RankedScreenRows
+        FROM ProjectedScreenRows
         WHERE FSBDisplayRank <= 2;
 
         -----------------------------------------------------------------------
@@ -520,7 +594,8 @@ BEGIN
 
                 StatusColor,
                 StatusCode,
-                StatusText
+                StatusText,
+                UserName
             FROM #ScreenRows
             ORDER BY
                 SponsorID,
@@ -577,7 +652,8 @@ BEGIN
                 HasValidRenewal,
                 ValidRenewalRPHID,
 
-                SecondHalfPaid
+                SecondHalfPaid,
+                UserName
 
             FROM #ScreenRows
             ORDER BY
