@@ -69,9 +69,9 @@ BEGIN
                 firstFc.FSBCommissionID AS FirstFSBCommissionID,
                 firstFc.CreatedAt AS FirstCommissionCreatedAt,
 
-                firstFc.PromotionID,
-                firstFc.SponsorID,
-                firstFc.SponsorFSB1Start,
+                ft.PromotionID,
+                ft.SponsorID,
+                ft.SponsorFSB1Start,
 
                 firstFc.FSBType AS CommissionFSBType,
                 firstFc.HalfType AS FirstHalfType,
@@ -117,16 +117,20 @@ BEGIN
                 up.UserName,
                 up.FirstName,
                 up.LastName,
+				(CASE 
+					WHEN o.ProductID = 20 and o.IsEliteTravelAdvantagePro = 1 
+					THEN 'Travel Advantage Elite'
+					ELSE prod.[Name] 
+				END) AS ProductName
 
-                prod.[Name] AS ProductName
+            FROM 
+            dbo.FSBTrackings ft
 
-            FROM dbo.FSBCommission firstFc
-
-            INNER JOIN dbo.FSBCommissionDetail firstDetail
-                ON firstDetail.FSBCommissionID = firstFc.FSBCommissionID
-
-            INNER JOIN dbo.FSBTrackings ft
+            LEFT JOIN dbo.FSBCommissionDetail firstDetail
                 ON ft.FSBTrackingID = firstDetail.FSBTrackingID
+
+            LEFT JOIN dbo.FSBCommission firstFc
+                ON firstDetail.FSBCommissionID = firstFc.FSBCommissionID
 
             INNER JOIN dbo.[Order] o
                 ON o.OrderID = ft.OrderID
@@ -164,9 +168,9 @@ BEGIN
             LEFT JOIN dbo.RecurringPayments rp
                 ON rp.[OrderId] = ft.OrderID
 
-            WHERE firstFc.PromotionID = @EffectivePromotionID
-              AND firstFc.HalfType = 'FIRST'
-              AND (@SponsorID IS NULL OR firstFc.SponsorID = @SponsorID)
+            WHERE ft.PromotionID = @EffectivePromotionID
+              AND (firstFc.HalfType IS NULL or firstFc.HalfType = 'FIRST')
+              AND (@SponsorID IS NULL OR ft.SponsorID = @SponsorID)
         ),
 
         RenewalEval AS
@@ -632,7 +636,7 @@ BEGIN
 
                 Ambassador,
 
-                PromoterEnrollDate AS EnrollDate,
+                OrderDate AS EnrollDate,
 
                 Product,
 
