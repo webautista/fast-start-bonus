@@ -80,8 +80,14 @@ BEGIN
                 ft.FSBType AS TrackingFSBType,
 
                 ft.PromoterID,
-                promoter.UserProfileID,
-                promoter.EnrollDate AS PromoterEnrollDate,
+                ft.CustomerID,
+                ft.ParticipantUserID,
+                ft.CandidateType,
+                ft.ParticipantUserID AS UserProfileID,
+                CASE
+                    WHEN ft.CandidateType = 'PROMOTER' THEN promoter.EnrollDate
+                    ELSE o.OrderDate
+                END AS PromoterEnrollDate,
 
                 ft.OrderID,
                 o.OrderDate,
@@ -135,11 +141,12 @@ BEGIN
             INNER JOIN dbo.[Order] o
                 ON o.OrderID = ft.OrderID
 
-            INNER JOIN dbo.Promoters promoter
+            LEFT JOIN dbo.Promoters promoter
                 ON promoter.PromoterID = ft.PromoterID
+               AND ft.CandidateType = 'PROMOTER'
 
             LEFT JOIN dbo.UserProfile up
-                ON up.UserID = promoter.UserProfileID
+                ON up.UserID = ft.ParticipantUserID
 
             LEFT JOIN dbo.Product prod
                 ON prod.ProductID = o.ProductID
@@ -377,7 +384,9 @@ BEGIN
 
             FSBTrackingID,
 
+            CandidateType,
             PromoterID,
+            CustomerID,
             UserProfileID,
             UserName,
 
@@ -395,7 +404,14 @@ BEGIN
                     ''
                 ),
                 UserName,
-                CONVERT(VARCHAR(50), PromoterID)
+                CONVERT
+                (
+                    VARCHAR(50),
+                    CASE
+                        WHEN CandidateType = 'CUSTOMER' THEN CustomerID
+                        ELSE PromoterID
+                    END
+                )
             ) AS Ambassador,
 
             PromoterEnrollDate,
@@ -552,7 +568,9 @@ BEGIN
 
                 FSBTrackingID,
 
+                CandidateType,
                 PromoterID,
+                CustomerID,
                 UserProfileID,
                 Ambassador,
 
@@ -609,6 +627,7 @@ BEGIN
                     WHEN TrackingFSBType = 'FSB1_EXT' THEN 2
                     WHEN TrackingFSBType = 'FSB2' THEN 3
                     WHEN TrackingFSBType = 'FSB3' THEN 4
+                    WHEN TrackingFSBType = 'NO_FSB' THEN 5
                     ELSE 99
                 END,
                 OrderDate,
@@ -650,6 +669,7 @@ BEGIN
 
                 OrderID,
 
+                CandidateType,
                 TrackingFSBType,
                 CommissionFSBType,
 
@@ -668,6 +688,7 @@ BEGIN
                     WHEN TrackingFSBType = 'FSB1_EXT' THEN 2
                     WHEN TrackingFSBType = 'FSB2' THEN 3
                     WHEN TrackingFSBType = 'FSB3' THEN 4
+                    WHEN TrackingFSBType = 'NO_FSB' THEN 5
                     ELSE 99
                 END,
                 OrderDate,

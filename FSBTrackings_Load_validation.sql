@@ -1,10 +1,10 @@
 /*
-    Validation script for dbo.FSBTrackings_Load dynamic FSB tracking classification.
+    Validation script for dbo.FSBTrackings_Load with audited candidate universe.
 
     Purpose:
-    1. Recalculate expected FSBTrackings rows for a Promotion/Sponsor scope.
-    2. Compare expected tracking rows, including partial non-commission windows, vs dbo.FSBTrackings after dbo.FSBTrackings_Load runs.
-    3. Report missing promoters/orders, extra rows, date mismatches, duplicates and rule violations.
+    1. Recalculate expected dbo.FSBCandidates rows for a Promotion/Sponsor scope.
+    2. Recalculate expected dbo.FSBTrackings rows, including NO_FSB, for the same scope.
+    3. Compare expected vs actual rows after dbo.FSBTrackings_Load runs.
 
     Usage:
     - Set @PromotionID and optional @SponsorID.
@@ -17,15 +17,13 @@ DECLARE @PromotionID BIGINT;
 DECLARE @SponsorID BIGINT = NULL; -- set a SponsorID to validate a single sponsor
 
 -- Example:
--- SELECT @PromotionID = PromotionID
--- FROM dbo.Promotions
--- WHERE Code = 'FSB_2026_MAIN';
+SELECT @PromotionID = PromotionID
+FROM dbo.Promotions
+WHERE Code = 'FSB_2026_MAIN';
 
 -- TODO: Set this value before running if the SELECT above is not used.
 -- SET @PromotionID = 123;
 
-DECLARE @PromotionStartDate DATETIME;
-DECLARE @PromotionEndDate DATETIME;
 DECLARE @NullDate DATETIME = CONVERT(DATETIME, '19000101', 112);
 
 IF @PromotionID IS NULL
@@ -34,13 +32,12 @@ BEGIN
     RETURN;
 END;
 
-SELECT
-    @PromotionStartDate = StartDate,
-    @PromotionEndDate = EndDate
-FROM dbo.Promotions
-WHERE PromotionID = @PromotionID;
-
-IF @PromotionStartDate IS NULL OR @PromotionEndDate IS NULL
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM dbo.Promotions
+    WHERE PromotionID = @PromotionID
+)
 BEGIN
     RAISERROR('Invalid @PromotionID.', 16, 1);
     RETURN;
@@ -51,6 +48,7 @@ END;
 -------------------------------------------------------------------------------
 
 IF OBJECT_ID('tempdb..#V_ScopeSponsors') IS NOT NULL DROP TABLE #V_ScopeSponsors;
+IF OBJECT_ID('tempdb..#V_Universe') IS NOT NULL DROP TABLE #V_Universe;
 IF OBJECT_ID('tempdb..#V_BaseOrders') IS NOT NULL DROP TABLE #V_BaseOrders;
 IF OBJECT_ID('tempdb..#V_FSB1WindowRows') IS NOT NULL DROP TABLE #V_FSB1WindowRows;
 IF OBJECT_ID('tempdb..#V_FSB1Qualified') IS NOT NULL DROP TABLE #V_FSB1Qualified;
@@ -65,8 +63,13 @@ IF OBJECT_ID('tempdb..#V_FSB2Rows') IS NOT NULL DROP TABLE #V_FSB2Rows;
 IF OBJECT_ID('tempdb..#V_FSB3WindowRows') IS NOT NULL DROP TABLE #V_FSB3WindowRows;
 IF OBJECT_ID('tempdb..#V_FSB3Qualified') IS NOT NULL DROP TABLE #V_FSB3Qualified;
 IF OBJECT_ID('tempdb..#V_FSB3Rows') IS NOT NULL DROP TABLE #V_FSB3Rows;
-IF OBJECT_ID('tempdb..#V_Expected') IS NOT NULL DROP TABLE #V_Expected;
-IF OBJECT_ID('tempdb..#V_Actual') IS NOT NULL DROP TABLE #V_Actual;
+IF OBJECT_ID('tempdb..#V_Classified') IS NOT NULL DROP TABLE #V_Classified;
+IF OBJECT_ID('tempdb..#V_SelectedKeys') IS NOT NULL DROP TABLE #V_SelectedKeys;
+IF OBJECT_ID('tempdb..#V_OrderIDs') IS NOT NULL DROP TABLE #V_OrderIDs;
+IF OBJECT_ID('tempdb..#V_OrderPayments') IS NOT NULL DROP TABLE #V_OrderPayments;
+IF OBJECT_ID('tempdb..#V_ExpectedTrackings') IS NOT NULL DROP TABLE #V_ExpectedTrackings;
+IF OBJECT_ID('tempdb..#V_ActualTrackings') IS NOT NULL DROP TABLE #V_ActualTrackings;
+IF OBJECT_ID('tempdb..#V_ActualCandidates') IS NOT NULL DROP TABLE #V_ActualCandidates;
 
 -------------------------------------------------------------------------------
 -- 1. Scope sponsors
@@ -76,6 +79,7 @@ CREATE TABLE #V_ScopeSponsors
 (
     PromotionID BIGINT NOT NULL,
     SponsorID BIGINT NOT NULL,
+    SponsorUserID BIGINT NOT NULL,
     SponsorFSB1Start DATETIME NOT NULL
 );
 
@@ -83,11 +87,13 @@ INSERT INTO #V_ScopeSponsors
 (
     PromotionID,
     SponsorID,
+    SponsorUserID,
     SponsorFSB1Start
 )
 SELECT DISTINCT
     @PromotionID AS PromotionID,
     sponsor.PromoterID AS SponsorID,
+    sponsor.UserProfileID AS SponsorUserID,
     sponsor.FSB1StartDate AS SponsorFSB1Start
 FROM dbo.Promoters sponsor
 WHERE sponsor.FSB1StartDate IS NOT NULL
@@ -103,54 +109,101 @@ ON #V_ScopeSponsors
 );
 
 -------------------------------------------------------------------------------
--- 2. Base valid orders: one valid order per promoter in the FSB cycle.
+-- 2. Expected complete candidate universe
 -------------------------------------------------------------------------------
 
-CREATE TABLE #V_BaseOrders
+CREATE TABLE #V_Universe
 (
     PromotionID BIGINT NOT NULL,
     SponsorID BIGINT NOT NULL,
-    PromoterID BIGINT NOT NULL,
+    SponsorUserID BIGINT NOT NULL,
+    SponsorFSB1Start DATETIME NOT NULL,
+
+    CandidateKey BIGINT NOT NULL,
+    CandidateType VARCHAR(20) NOT NULL,
+
+    PromoterID BIGINT NULL,
+    CustomerID BIGINT NOT NULL,
+    ParticipantUserID BIGINT NOT NULL,
+
     OrderID BIGINT NOT NULL,
     OrderDate DATETIME NOT NULL,
+    ProductID INT NOT NULL,
+    OrderStatus VARCHAR(20) NOT NULL,
 
-    SponsorFSB1Start DATETIME NOT NULL,
-    SponsorFSB1MaxEnd DATETIME NOT NULL,
-    SponsorFSB1ExtMaxEnd DATETIME NOT NULL
+    IsExcludedProduct BIT NOT NULL,
+    IsStaticEligible BIT NOT NULL,
+    StaticEligibilityReason VARCHAR(200) NULL,
+
+    IsEliteTravelAdvantagePro BIT NULL,
+    IsPromoCouponApplied BIT NULL,
+    IsPermanentPromoCouponApplied BIT NULL,
+    FreeCommission BIT NULL,
+    IsDagCustomer BIT NULL,
+    IsCreatedWithPromoPrice BIT NULL
 );
 
-;WITH RawOrders AS
+;WITH PromoterUniverse AS
 (
     SELECT
         @PromotionID AS PromotionID,
+        scope.SponsorID,
+        scope.SponsorUserID,
+        scope.SponsorFSB1Start,
 
-        sponsor.PromoterID AS SponsorID,
-        child.PromoterID AS PromoterID,
+        CAST(child.PromoterID AS BIGINT) AS CandidateKey,
+        CAST('PROMOTER' AS VARCHAR(20)) AS CandidateType,
 
-        o.OrderID,
+        CAST(child.PromoterID AS BIGINT) AS PromoterID,
+        CAST(c.CustomerID AS BIGINT) AS CustomerID,
+        CAST(upChild.UserID AS BIGINT) AS ParticipantUserID,
+
+        CAST(o.OrderID AS BIGINT) AS OrderID,
         o.OrderDate,
+        o.ProductID,
+        CAST(ISNULL(o.[Status], '') AS VARCHAR(20)) AS OrderStatus,
 
-        scope.SponsorFSB1Start AS SponsorFSB1Start,
-        DATEADD(DAY, 7, scope.SponsorFSB1Start) AS SponsorFSB1MaxEnd,
-        DATEADD(DAY, 14, scope.SponsorFSB1Start) AS SponsorFSB1ExtMaxEnd,
-
-        ROW_NUMBER() OVER
+        CAST(CASE WHEN ppExcluded.PromotionProductID IS NULL THEN 0 ELSE 1 END AS BIT) AS IsExcludedProduct,
+        CAST
         (
-            PARTITION BY
-                sponsor.PromoterID,
-                child.PromoterID,
-                scope.SponsorFSB1Start
-            ORDER BY
-                o.OrderDate,
-                o.OrderID
-        ) AS rn
-    FROM dbo.Promoters child
-    INNER JOIN dbo.Promoters sponsor
-        ON sponsor.PromoterID = child.SponsorID
-    INNER JOIN #V_ScopeSponsors scope
-        ON scope.PromotionID = @PromotionID
-       AND scope.SponsorID = sponsor.PromoterID
-       AND scope.SponsorFSB1Start = sponsor.FSB1StartDate
+            CASE
+                WHEN child.Active <> 1 THEN 0
+                WHEN NOT (child.FreeType = 0 OR child.FreeType IS NULL) THEN 0
+                WHEN upChild.SpecialCode IS NOT NULL THEN 0
+                WHEN ISNULL(o.[Status], '') <> 'Active' THEN 0
+                WHEN ppExcluded.PromotionProductID IS NOT NULL THEN 0
+                WHEN o.ProductID NOT IN (20, 23, 25, 26, 27, 28) THEN 0
+                WHEN ISNULL(o.FreeCommission, 0) <> 0 THEN 0
+                WHEN ISNULL(o.IsDagCustomer, 0) <> 0 THEN 0
+                WHEN ISNULL(o.IsCreatedWithPromoPrice, 0) <> 0 THEN 0
+                ELSE 1
+            END
+        AS BIT) AS IsStaticEligible,
+        CAST
+        (
+            CASE
+                WHEN child.Active <> 1 THEN 'PROMOTER_INACTIVE'
+                WHEN NOT (child.FreeType = 0 OR child.FreeType IS NULL) THEN 'PROMOTER_FREETYPE'
+                WHEN upChild.SpecialCode IS NOT NULL THEN 'PROMOTER_SPECIALCODE'
+                WHEN ISNULL(o.[Status], '') <> 'Active' THEN 'ORDER_STATUS'
+                WHEN ppExcluded.PromotionProductID IS NOT NULL THEN 'EXCLUDED_PRODUCT'
+                WHEN o.ProductID NOT IN (20, 23, 25, 26, 27, 28) THEN 'PROMOTER_PRODUCT'
+                WHEN ISNULL(o.FreeCommission, 0) <> 0 THEN 'FREE_COMMISSION'
+                WHEN ISNULL(o.IsDagCustomer, 0) <> 0 THEN 'DAG_CUSTOMER'
+                WHEN ISNULL(o.IsCreatedWithPromoPrice, 0) <> 0 THEN 'PROMO_PRICE'
+                ELSE NULL
+            END
+        AS VARCHAR(200)) AS StaticEligibilityReason,
+
+        CAST(o.IsEliteTravelAdvantagePro AS BIT) AS IsEliteTravelAdvantagePro,
+        CAST(o.IsPromoCouponApplied AS BIT) AS IsPromoCouponApplied,
+        CAST(o.IsPermanentPromoCouponApplied AS BIT) AS IsPermanentPromoCouponApplied,
+        CAST(o.FreeCommission AS BIT) AS FreeCommission,
+        CAST(o.IsDagCustomer AS BIT) AS IsDagCustomer,
+        CAST(o.IsCreatedWithPromoPrice AS BIT) AS IsCreatedWithPromoPrice
+    FROM #V_ScopeSponsors scope
+    INNER JOIN dbo.Promoters child
+        ON child.SponsorID = scope.SponsorID
     INNER JOIN dbo.UserProfile upChild
         ON upChild.UserID = child.UserProfileID
     INNER JOIN dbo.MWRCustomers c
@@ -161,19 +214,228 @@ CREATE TABLE #V_BaseOrders
         ON ppExcluded.PromotionID = @PromotionID
        AND ppExcluded.ProductID = o.ProductID
        AND ppExcluded.IsExcluded = 1
-    WHERE ppExcluded.PromotionProductID IS NULL
-      AND o.Status = 'Active'
-      AND o.OrderDate IS NOT NULL
-      AND o.OrderDate >= @PromotionStartDate
-      AND o.OrderDate <= @PromotionEndDate
+    WHERE o.OrderDate IS NOT NULL
       AND o.OrderDate >= scope.SponsorFSB1Start
       AND o.OrderDate <= DATEADD(DAY, 21, scope.SponsorFSB1Start)
+),
+CustomerUniverse AS
+(
+    SELECT
+        @PromotionID AS PromotionID,
+        scope.SponsorID,
+        scope.SponsorUserID,
+        scope.SponsorFSB1Start,
+
+        -1 * CAST(c.CustomerID AS BIGINT) AS CandidateKey,
+        CAST('CUSTOMER' AS VARCHAR(20)) AS CandidateType,
+
+        CAST(NULL AS BIGINT) AS PromoterID,
+        CAST(c.CustomerID AS BIGINT) AS CustomerID,
+        CAST(c.UserID AS BIGINT) AS ParticipantUserID,
+
+        CAST(o.OrderID AS BIGINT) AS OrderID,
+        o.OrderDate,
+        o.ProductID,
+        CAST(ISNULL(o.[Status], '') AS VARCHAR(20)) AS OrderStatus,
+
+        CAST(CASE WHEN ppExcluded.PromotionProductID IS NULL THEN 0 ELSE 1 END AS BIT) AS IsExcludedProduct,
+        CAST
+        (
+            CASE
+                WHEN ISNULL(o.[Status], '') <> 'Active' THEN 0
+                WHEN ppExcluded.PromotionProductID IS NOT NULL THEN 0
+                WHEN o.ProductID <> 20 THEN 0
+                WHEN ISNULL(o.IsEliteTravelAdvantagePro, 0) = 0 THEN 0
+                WHEN ISNULL(o.IsPromoCouponApplied, 0) <> 0 THEN 0
+                WHEN ISNULL(o.IsPermanentPromoCouponApplied, 0) <> 0 THEN 0
+                WHEN ISNULL(o.FreeCommission, 0) <> 0 THEN 0
+                WHEN ISNULL(o.IsDagCustomer, 0) <> 0 THEN 0
+                WHEN ISNULL(o.IsCreatedWithPromoPrice, 0) <> 0 THEN 0
+                ELSE 1
+            END
+        AS BIT) AS IsStaticEligible,
+        CAST
+        (
+            CASE
+                WHEN ISNULL(o.[Status], '') <> 'Active' THEN 'ORDER_STATUS'
+                WHEN ppExcluded.PromotionProductID IS NOT NULL THEN 'EXCLUDED_PRODUCT'
+                WHEN o.ProductID <> 20 THEN 'CUSTOMER_PRODUCT'
+                WHEN ISNULL(o.IsEliteTravelAdvantagePro, 0) = 0 THEN 'NOT_ELITE'
+                WHEN ISNULL(o.IsPromoCouponApplied, 0) <> 0 THEN 'PROMO_COUPON'
+                WHEN ISNULL(o.IsPermanentPromoCouponApplied, 0) <> 0 THEN 'PERMANENT_PROMO_COUPON'
+                WHEN ISNULL(o.FreeCommission, 0) <> 0 THEN 'FREE_COMMISSION'
+                WHEN ISNULL(o.IsDagCustomer, 0) <> 0 THEN 'DAG_CUSTOMER'
+                WHEN ISNULL(o.IsCreatedWithPromoPrice, 0) <> 0 THEN 'PROMO_PRICE'
+                ELSE NULL
+            END
+        AS VARCHAR(200)) AS StaticEligibilityReason,
+
+        CAST(o.IsEliteTravelAdvantagePro AS BIT) AS IsEliteTravelAdvantagePro,
+        CAST(o.IsPromoCouponApplied AS BIT) AS IsPromoCouponApplied,
+        CAST(o.IsPermanentPromoCouponApplied AS BIT) AS IsPermanentPromoCouponApplied,
+        CAST(o.FreeCommission AS BIT) AS FreeCommission,
+        CAST(o.IsDagCustomer AS BIT) AS IsDagCustomer,
+        CAST(o.IsCreatedWithPromoPrice AS BIT) AS IsCreatedWithPromoPrice
+    FROM #V_ScopeSponsors scope
+    INNER JOIN dbo.MWRCustomers c
+        ON c.SponsorMemberID = scope.SponsorUserID
+       AND c.UserID <> scope.SponsorUserID
+    INNER JOIN dbo.[Order] o
+        ON o.CustomerID = c.CustomerID
+    LEFT JOIN dbo.PromotionProducts ppExcluded
+        ON ppExcluded.PromotionID = @PromotionID
+       AND ppExcluded.ProductID = o.ProductID
+       AND ppExcluded.IsExcluded = 1
+    WHERE o.OrderDate IS NOT NULL
+      AND o.OrderDate >= scope.SponsorFSB1Start
+      AND o.OrderDate <= DATEADD(DAY, 21, scope.SponsorFSB1Start)
+)
+INSERT INTO #V_Universe
+(
+    PromotionID,
+    SponsorID,
+    SponsorUserID,
+    SponsorFSB1Start,
+    CandidateKey,
+    CandidateType,
+    PromoterID,
+    CustomerID,
+    ParticipantUserID,
+    OrderID,
+    OrderDate,
+    ProductID,
+    OrderStatus,
+    IsExcludedProduct,
+    IsStaticEligible,
+    StaticEligibilityReason,
+    IsEliteTravelAdvantagePro,
+    IsPromoCouponApplied,
+    IsPermanentPromoCouponApplied,
+    FreeCommission,
+    IsDagCustomer,
+    IsCreatedWithPromoPrice
+)
+SELECT
+    PromotionID,
+    SponsorID,
+    SponsorUserID,
+    SponsorFSB1Start,
+    CandidateKey,
+    CandidateType,
+    PromoterID,
+    CustomerID,
+    ParticipantUserID,
+    OrderID,
+    OrderDate,
+    ProductID,
+    OrderStatus,
+    IsExcludedProduct,
+    IsStaticEligible,
+    StaticEligibilityReason,
+    IsEliteTravelAdvantagePro,
+    IsPromoCouponApplied,
+    IsPermanentPromoCouponApplied,
+    FreeCommission,
+    IsDagCustomer,
+    IsCreatedWithPromoPrice
+FROM PromoterUniverse
+
+UNION ALL
+
+SELECT
+    PromotionID,
+    SponsorID,
+    SponsorUserID,
+    SponsorFSB1Start,
+    CandidateKey,
+    CandidateType,
+    PromoterID,
+    CustomerID,
+    ParticipantUserID,
+    OrderID,
+    OrderDate,
+    ProductID,
+    OrderStatus,
+    IsExcludedProduct,
+    IsStaticEligible,
+    StaticEligibilityReason,
+    IsEliteTravelAdvantagePro,
+    IsPromoCouponApplied,
+    IsPermanentPromoCouponApplied,
+    FreeCommission,
+    IsDagCustomer,
+    IsCreatedWithPromoPrice
+FROM CustomerUniverse
+OPTION (RECOMPILE);
+
+CREATE CLUSTERED INDEX CX_V_Universe
+ON #V_Universe
+(
+    PromotionID,
+    SponsorID,
+    SponsorFSB1Start,
+    CandidateType,
+    CandidateKey,
+    OrderDate,
+    OrderID
+);
+
+-------------------------------------------------------------------------------
+-- 3. Expected base orders: first static-eligible order per associated entity
+-------------------------------------------------------------------------------
+
+CREATE TABLE #V_BaseOrders
+(
+    PromotionID BIGINT NOT NULL,
+    SponsorID BIGINT NOT NULL,
+    PromoterID BIGINT NOT NULL,
+    CustomerID BIGINT NOT NULL,
+    ParticipantUserID BIGINT NOT NULL,
+    CandidateType VARCHAR(20) NOT NULL,
+    OrderID BIGINT NOT NULL,
+    OrderDate DATETIME NOT NULL,
+    SponsorFSB1Start DATETIME NOT NULL,
+    SponsorFSB1MaxEnd DATETIME NOT NULL,
+    SponsorFSB1ExtMaxEnd DATETIME NOT NULL
+);
+
+;WITH RankedBase AS
+(
+    SELECT
+        u.PromotionID,
+        u.SponsorID,
+        u.CandidateKey AS PromoterID,
+        u.CustomerID,
+        u.ParticipantUserID,
+        u.CandidateType,
+        u.OrderID,
+        u.OrderDate,
+        u.SponsorFSB1Start,
+        DATEADD(DAY, 7, u.SponsorFSB1Start) AS SponsorFSB1MaxEnd,
+        DATEADD(DAY, 14, u.SponsorFSB1Start) AS SponsorFSB1ExtMaxEnd,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY
+                u.PromotionID,
+                u.SponsorID,
+                u.SponsorFSB1Start,
+                u.CandidateType,
+                u.CandidateKey
+            ORDER BY
+                u.OrderDate,
+                u.OrderID
+        ) AS rn
+    FROM #V_Universe u
+    WHERE u.IsStaticEligible = 1
 )
 INSERT INTO #V_BaseOrders
 (
     PromotionID,
     SponsorID,
     PromoterID,
+    CustomerID,
+    ParticipantUserID,
+    CandidateType,
     OrderID,
     OrderDate,
     SponsorFSB1Start,
@@ -184,12 +446,15 @@ SELECT
     PromotionID,
     SponsorID,
     PromoterID,
+    CustomerID,
+    ParticipantUserID,
+    CandidateType,
     OrderID,
     OrderDate,
     SponsorFSB1Start,
     SponsorFSB1MaxEnd,
     SponsorFSB1ExtMaxEnd
-FROM RawOrders
+FROM RankedBase
 WHERE rn = 1
 OPTION (RECOMPILE);
 
@@ -202,7 +467,7 @@ ON #V_BaseOrders
     PromoterID
 );
 
-CREATE INDEX IX_V_BaseOrders_OrderCursor
+CREATE INDEX IX_V_BaseOrders_OrderDate
 ON #V_BaseOrders
 (
     SponsorID,
@@ -212,7 +477,7 @@ ON #V_BaseOrders
 );
 
 -------------------------------------------------------------------------------
--- 3. Expected FSB1 normal
+-- 4. Expected FSB1 / FSB1_EXT / FSB2 / FSB3 / NO_FSB classification
 -------------------------------------------------------------------------------
 
 ;WITH RankedFSB1 AS
@@ -284,11 +549,6 @@ ON #V_FSB1NormalRows
     SponsorFSB1Start,
     PromoterID
 );
-
--------------------------------------------------------------------------------
--- 4. Expected FSB1_EXT. Only when normal FSB1 was not completed.
---    FSB1_EXT does not unlock FSB2 or FSB3.
--------------------------------------------------------------------------------
 
 ;WITH RankedFSB1Ext AS
 (
@@ -362,10 +622,6 @@ ON #V_FSB1ExtRows
     SponsorFSB1Start,
     PromoterID
 );
-
--------------------------------------------------------------------------------
--- 5. Expected FSB2. Only after regular FSB1.
--------------------------------------------------------------------------------
 
 SELECT
     q.PromotionID,
@@ -476,8 +732,7 @@ LEFT JOIN #V_FSB2Qualified q
     ON q.PromotionID = f2.PromotionID
    AND q.SponsorID = f2.SponsorID
    AND q.SponsorFSB1Start = f2.SponsorFSB1Start
-WHERE
-      (q.PromotionID IS NOT NULL AND f2.FSB2Rank <= 2)
+WHERE (q.PromotionID IS NOT NULL AND f2.FSB2Rank <= 2)
    OR (q.PromotionID IS NULL);
 
 CREATE CLUSTERED INDEX CX_V_FSB2Rows
@@ -488,10 +743,6 @@ ON #V_FSB2Rows
     SponsorFSB1Start,
     PromoterID
 );
-
--------------------------------------------------------------------------------
--- 6. Expected FSB3. Only after regular FSB1 and FSB2.
--------------------------------------------------------------------------------
 
 ;WITH RankedFSB3 AS
 (
@@ -595,35 +846,34 @@ ON #V_FSB3Rows
     PromoterID
 );
 
--------------------------------------------------------------------------------
--- 7. Expected classified rows
--------------------------------------------------------------------------------
-
-CREATE TABLE #V_Expected
+CREATE TABLE #V_Classified
 (
     PromotionID BIGINT NOT NULL,
     SponsorID BIGINT NOT NULL,
     PromoterID BIGINT NOT NULL,
+    CustomerID BIGINT NOT NULL,
+    ParticipantUserID BIGINT NOT NULL,
+    CandidateType VARCHAR(20) NOT NULL,
     OrderID BIGINT NOT NULL,
     OrderDate DATETIME NOT NULL,
     FSBType VARCHAR(20) NOT NULL,
-
     SponsorFSB1Start DATETIME NOT NULL,
     SponsorFSB1End DATETIME NOT NULL,
     SponsorFSB1ExtEnd DATETIME NOT NULL,
-
     SponsorFSB2Start DATETIME NULL,
     SponsorFSB2End DATETIME NULL,
-
     SponsorFSB3Start DATETIME NULL,
     SponsorFSB3End DATETIME NULL
 );
 
-INSERT INTO #V_Expected
+INSERT INTO #V_Classified
 SELECT
     f1Rows.PromotionID,
     f1Rows.SponsorID,
     f1Rows.PromoterID,
+    f1Rows.CustomerID,
+    f1Rows.ParticipantUserID,
+    f1Rows.CandidateType,
     f1Rows.OrderID,
     f1Rows.OrderDate,
     'FSB1' AS FSBType,
@@ -649,11 +899,14 @@ LEFT JOIN #V_FSB3Qualified f3
    AND f3.SponsorID = f1Rows.SponsorID
    AND f3.SponsorFSB1Start = f1Rows.SponsorFSB1Start;
 
-INSERT INTO #V_Expected
+INSERT INTO #V_Classified
 SELECT
     extRows.PromotionID,
     extRows.SponsorID,
     extRows.PromoterID,
+    extRows.CustomerID,
+    extRows.ParticipantUserID,
+    extRows.CandidateType,
     extRows.OrderID,
     extRows.OrderDate,
     'FSB1_EXT' AS FSBType,
@@ -670,11 +923,14 @@ LEFT JOIN #V_FSB1ExtQualified f1Ext
    AND f1Ext.SponsorID = extRows.SponsorID
    AND f1Ext.SponsorFSB1Start = extRows.SponsorFSB1Start;
 
-INSERT INTO #V_Expected
+INSERT INTO #V_Classified
 SELECT
     f2Rows.PromotionID,
     f2Rows.SponsorID,
     f2Rows.PromoterID,
+    f2Rows.CustomerID,
+    f2Rows.ParticipantUserID,
+    f2Rows.CandidateType,
     f2Rows.OrderID,
     f2Rows.OrderDate,
     'FSB2' AS FSBType,
@@ -699,11 +955,14 @@ LEFT JOIN #V_FSB3Qualified f3
    AND f3.SponsorID = f2Rows.SponsorID
    AND f3.SponsorFSB1Start = f2Rows.SponsorFSB1Start;
 
-INSERT INTO #V_Expected
+INSERT INTO #V_Classified
 SELECT
     f3Rows.PromotionID,
     f3Rows.SponsorID,
     f3Rows.PromoterID,
+    f3Rows.CustomerID,
+    f3Rows.ParticipantUserID,
+    f3Rows.CandidateType,
     f3Rows.OrderID,
     f3Rows.OrderDate,
     'FSB3' AS FSBType,
@@ -728,134 +987,338 @@ LEFT JOIN #V_FSB3Qualified f3
    AND f3.SponsorID = f3Rows.SponsorID
    AND f3.SponsorFSB1Start = f3Rows.SponsorFSB1Start;
 
-CREATE CLUSTERED INDEX CX_V_Expected
-ON #V_Expected
+CREATE CLUSTERED INDEX CX_V_Classified
+ON #V_Classified
 (
     PromotionID,
     SponsorID,
     SponsorFSB1Start,
     FSBType,
+    PromoterID
+);
+
+SELECT DISTINCT
+    PromotionID,
+    SponsorID,
+    SponsorFSB1Start,
+    PromoterID,
+    OrderID
+INTO #V_SelectedKeys
+FROM #V_Classified;
+
+CREATE UNIQUE CLUSTERED INDEX CX_V_SelectedKeys
+ON #V_SelectedKeys
+(
+    PromotionID,
+    SponsorID,
+    SponsorFSB1Start,
     PromoterID,
     OrderID
 );
 
+INSERT INTO #V_Classified
+SELECT
+    b.PromotionID,
+    b.SponsorID,
+    b.PromoterID,
+    b.CustomerID,
+    b.ParticipantUserID,
+    b.CandidateType,
+    b.OrderID,
+    b.OrderDate,
+    'NO_FSB' AS FSBType,
+    b.SponsorFSB1Start,
+    ISNULL(f1.FSB1EndDate, b.SponsorFSB1MaxEnd) AS SponsorFSB1End,
+    b.SponsorFSB1ExtMaxEnd AS SponsorFSB1ExtEnd,
+    f1.FSB2StartDate AS SponsorFSB2Start,
+    f2.FSB2EndDate AS SponsorFSB2End,
+    f2.FSB3StartDate AS SponsorFSB3Start,
+    f3.FSB3EndDate AS SponsorFSB3End
+FROM #V_BaseOrders b
+LEFT JOIN #V_FSB1Completion f1
+    ON f1.PromotionID = b.PromotionID
+   AND f1.SponsorID = b.SponsorID
+   AND f1.SponsorFSB1Start = b.SponsorFSB1Start
+LEFT JOIN #V_FSB2Qualified f2
+    ON f2.PromotionID = b.PromotionID
+   AND f2.SponsorID = b.SponsorID
+   AND f2.SponsorFSB1Start = b.SponsorFSB1Start
+LEFT JOIN #V_FSB3Qualified f3
+    ON f3.PromotionID = b.PromotionID
+   AND f3.SponsorID = b.SponsorID
+   AND f3.SponsorFSB1Start = b.SponsorFSB1Start
+WHERE NOT EXISTS
+(
+    SELECT 1
+    FROM #V_SelectedKeys sk
+    WHERE sk.PromotionID = b.PromotionID
+      AND sk.SponsorID = b.SponsorID
+      AND sk.SponsorFSB1Start = b.SponsorFSB1Start
+      AND sk.PromoterID = b.PromoterID
+      AND sk.OrderID = b.OrderID
+);
+
 -------------------------------------------------------------------------------
--- 8. Actual current FSBTrackings rows in the same scope
+-- 5. Expected payments and expected tracking rows
 -------------------------------------------------------------------------------
+
+SELECT DISTINCT
+    OrderID
+INTO #V_OrderIDs
+FROM #V_Classified;
+
+CREATE UNIQUE CLUSTERED INDEX CX_V_OrderIDs
+ON #V_OrderIDs (OrderID);
+
+;WITH RankedPayments AS
+(
+    SELECT
+        rph.OrderID,
+        rph.ID,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY rph.OrderID
+            ORDER BY rph.CreateDate, rph.ID
+        ) AS PaymentRank
+    FROM dbo.RecurringPaymentsHistory rph
+    INNER JOIN #V_OrderIDs oi
+        ON oi.OrderID = rph.OrderID
+    WHERE rph.Status = 'SUCCESS'
+      AND ISNULL(rph.Reverted, 0) = 0
+)
+SELECT
+    oi.OrderID,
+    rp1.ID AS FirstRPHID,
+    rp2.ID AS SecondRPHID
+INTO #V_OrderPayments
+FROM #V_OrderIDs oi
+LEFT JOIN RankedPayments rp1
+    ON rp1.OrderID = oi.OrderID
+   AND rp1.PaymentRank = 1
+LEFT JOIN RankedPayments rp2
+    ON rp2.OrderID = oi.OrderID
+   AND rp2.PaymentRank = 2;
+
+CREATE UNIQUE CLUSTERED INDEX CX_V_OrderPayments
+ON #V_OrderPayments (OrderID);
+
+SELECT
+    c.PromotionID,
+    c.SponsorID,
+    c.PromoterID,
+    c.CustomerID,
+    c.ParticipantUserID,
+    c.CandidateType,
+    c.OrderID,
+    c.FSBType,
+    c.SponsorFSB1Start,
+    c.SponsorFSB1End,
+    c.SponsorFSB1ExtEnd,
+    c.SponsorFSB2Start,
+    c.SponsorFSB2End,
+    c.SponsorFSB3Start,
+    c.SponsorFSB3End,
+    op.FirstRPHID,
+    op.SecondRPHID
+INTO #V_ExpectedTrackings
+FROM #V_Classified c
+LEFT JOIN #V_OrderPayments op
+    ON op.OrderID = c.OrderID;
+
+CREATE CLUSTERED INDEX CX_V_ExpectedTrackings
+ON #V_ExpectedTrackings
+(
+    PromotionID,
+    SponsorID,
+    SponsorFSB1Start,
+    FSBType,
+    PromoterID
+);
+
+-------------------------------------------------------------------------------
+-- 6. Actual current FSBCandidates / FSBTrackings rows in the same scope
+-------------------------------------------------------------------------------
+
+SELECT
+    c.PromotionID,
+    c.SponsorID,
+    c.SponsorUserID,
+    c.SponsorFSB1Start,
+    c.CandidateKey,
+    c.CandidateType,
+    c.PromoterID,
+    c.CustomerID,
+    c.ParticipantUserID,
+    c.OrderID,
+    c.OrderDate,
+    c.ProductID,
+    c.OrderStatus,
+    c.IsExcludedProduct,
+    c.IsStaticEligible,
+    c.StaticEligibilityReason
+INTO #V_ActualCandidates
+FROM dbo.FSBCandidates c
+INNER JOIN #V_ScopeSponsors scope
+    ON scope.PromotionID = c.PromotionID
+   AND scope.SponsorID = c.SponsorID
+   AND scope.SponsorFSB1Start = c.SponsorFSB1Start
+WHERE c.PromotionID = @PromotionID;
+
+CREATE CLUSTERED INDEX CX_V_ActualCandidates
+ON #V_ActualCandidates
+(
+    PromotionID,
+    SponsorID,
+    SponsorFSB1Start,
+    CandidateType,
+    OrderID
+);
 
 SELECT
     ft.PromotionID,
     ft.SponsorID,
     ft.PromoterID,
+    ft.CustomerID,
+    ft.ParticipantUserID,
+    ft.CandidateType,
     ft.OrderID,
-    o.OrderDate,
     ft.FSBType,
-
     ft.SponsorFSB1Start,
     ft.SponsorFSB1End,
     ft.SponsorFSB1ExtEnd,
-
     ft.SponsorFSB2Start,
     ft.SponsorFSB2End,
-
     ft.SponsorFSB3Start,
-    ft.SponsorFSB3End
-INTO #V_Actual
+    ft.SponsorFSB3End,
+    ft.FirstRPHID,
+    ft.SecondRPHID
+INTO #V_ActualTrackings
 FROM dbo.FSBTrackings ft
 INNER JOIN #V_ScopeSponsors scope
     ON scope.PromotionID = ft.PromotionID
    AND scope.SponsorID = ft.SponsorID
    AND scope.SponsorFSB1Start = ft.SponsorFSB1Start
-LEFT JOIN dbo.[Order] o
-    ON o.OrderID = ft.OrderID
-WHERE ft.PromotionID = @PromotionID
-  AND (@SponsorID IS NULL OR ft.SponsorID = @SponsorID);
+WHERE ft.PromotionID = @PromotionID;
 
-CREATE CLUSTERED INDEX CX_V_Actual
-ON #V_Actual
+CREATE CLUSTERED INDEX CX_V_ActualTrackings
+ON #V_ActualTrackings
 (
     PromotionID,
     SponsorID,
     SponsorFSB1Start,
     FSBType,
-    PromoterID,
-    OrderID
+    PromoterID
 );
 
 -------------------------------------------------------------------------------
--- 9. Summary result. PASS when MissingRows, ExtraRows and DateMismatchRows are 0.
--------------------------------------------------------------------------------
-
-;WITH Missing AS
-(
-    SELECT e.*
-    FROM #V_Expected e
-    LEFT JOIN #V_Actual a
-        ON a.PromotionID = e.PromotionID
-       AND a.SponsorID = e.SponsorID
-       AND a.PromoterID = e.PromoterID
-       AND a.OrderID = e.OrderID
-       AND a.FSBType = e.FSBType
-       AND a.SponsorFSB1Start = e.SponsorFSB1Start
-    WHERE a.OrderID IS NULL
-),
-Extra AS
-(
-    SELECT a.*
-    FROM #V_Actual a
-    LEFT JOIN #V_Expected e
-        ON e.PromotionID = a.PromotionID
-       AND e.SponsorID = a.SponsorID
-       AND e.PromoterID = a.PromoterID
-       AND e.OrderID = a.OrderID
-       AND e.FSBType = a.FSBType
-       AND e.SponsorFSB1Start = a.SponsorFSB1Start
-    WHERE e.OrderID IS NULL
-),
-DateMismatch AS
-(
-    SELECT e.*
-    FROM #V_Expected e
-    INNER JOIN #V_Actual a
-        ON a.PromotionID = e.PromotionID
-       AND a.SponsorID = e.SponsorID
-       AND a.PromoterID = e.PromoterID
-       AND a.OrderID = e.OrderID
-       AND a.FSBType = e.FSBType
-       AND a.SponsorFSB1Start = e.SponsorFSB1Start
-    WHERE ISNULL(a.SponsorFSB1End, @NullDate) <> ISNULL(e.SponsorFSB1End, @NullDate)
-       OR ISNULL(a.SponsorFSB1ExtEnd, @NullDate) <> ISNULL(e.SponsorFSB1ExtEnd, @NullDate)
-       OR ISNULL(a.SponsorFSB2Start, @NullDate) <> ISNULL(e.SponsorFSB2Start, @NullDate)
-       OR ISNULL(a.SponsorFSB2End, @NullDate) <> ISNULL(e.SponsorFSB2End, @NullDate)
-       OR ISNULL(a.SponsorFSB3Start, @NullDate) <> ISNULL(e.SponsorFSB3Start, @NullDate)
-       OR ISNULL(a.SponsorFSB3End, @NullDate) <> ISNULL(e.SponsorFSB3End, @NullDate)
-)
-SELECT
-    CASE
-        WHEN (SELECT COUNT(*) FROM Missing) = 0
-         AND (SELECT COUNT(*) FROM Extra) = 0
-         AND (SELECT COUNT(*) FROM DateMismatch) = 0
-        THEN 'PASS'
-        ELSE 'FAIL'
-    END AS ValidationStatus,
-    (SELECT COUNT(*) FROM #V_ScopeSponsors) AS ScopeSponsors,
-    (SELECT COUNT(*) FROM #V_BaseOrders) AS BaseValidOrders,
-    (SELECT COUNT(*) FROM #V_Expected) AS ExpectedTrackingRows,
-    (SELECT COUNT(*) FROM #V_Actual) AS ActualTrackingRows,
-    (SELECT COUNT(*) FROM Missing) AS MissingRows,
-    (SELECT COUNT(*) FROM Extra) AS ExtraRows,
-    (SELECT COUNT(*) FROM DateMismatch) AS DateMismatchRows;
-
--------------------------------------------------------------------------------
--- 10. Detail: expected rows that were not loaded to dbo.FSBTrackings.
---     This is the primary report to find sponsors/promoters left out.
+-- 7. Universe summaries
 -------------------------------------------------------------------------------
 
 SELECT
-    'MISSING_IN_FSBTRACKINGS' AS Issue,
+    'EXPECTED_UNIVERSE_SUMMARY' AS ValidationSection,
+    CandidateType,
+    IsStaticEligible,
+    COUNT(*) AS Qty
+FROM #V_Universe
+GROUP BY
+    CandidateType,
+    IsStaticEligible
+ORDER BY
+    CandidateType,
+    IsStaticEligible DESC;
+
+SELECT
+    'ACTUAL_UNIVERSE_SUMMARY' AS ValidationSection,
+    CandidateType,
+    IsStaticEligible,
+    COUNT(*) AS Qty
+FROM #V_ActualCandidates
+GROUP BY
+    CandidateType,
+    IsStaticEligible
+ORDER BY
+    CandidateType,
+    IsStaticEligible DESC;
+
+-------------------------------------------------------------------------------
+-- 8. Universe detail mismatches
+-------------------------------------------------------------------------------
+
+SELECT
+    'MISSING_CANDIDATE' AS ValidationSection,
     e.*
-FROM #V_Expected e
-LEFT JOIN #V_Actual a
+FROM #V_Universe e
+LEFT JOIN #V_ActualCandidates a
+    ON a.PromotionID = e.PromotionID
+   AND a.SponsorID = e.SponsorID
+   AND a.SponsorFSB1Start = e.SponsorFSB1Start
+   AND a.CandidateType = e.CandidateType
+   AND a.OrderID = e.OrderID
+WHERE a.OrderID IS NULL
+ORDER BY
+    e.SponsorID,
+    e.SponsorFSB1Start,
+    e.CandidateType,
+    e.OrderDate,
+    e.OrderID;
+
+SELECT
+    'EXTRA_CANDIDATE' AS ValidationSection,
+    a.*
+FROM #V_ActualCandidates a
+LEFT JOIN #V_Universe e
+    ON e.PromotionID = a.PromotionID
+   AND e.SponsorID = a.SponsorID
+   AND e.SponsorFSB1Start = a.SponsorFSB1Start
+   AND e.CandidateType = a.CandidateType
+   AND e.OrderID = a.OrderID
+WHERE e.OrderID IS NULL
+ORDER BY
+    a.SponsorID,
+    a.SponsorFSB1Start,
+    a.CandidateType,
+    a.OrderDate,
+    a.OrderID;
+
+-------------------------------------------------------------------------------
+-- 9. Tracking summaries
+-------------------------------------------------------------------------------
+
+SELECT
+    'EXPECTED_TRACKING_SUMMARY' AS ValidationSection,
+    FSBType,
+    CandidateType,
+    COUNT(*) AS Qty
+FROM #V_ExpectedTrackings
+GROUP BY
+    FSBType,
+    CandidateType
+ORDER BY
+    FSBType,
+    CandidateType;
+
+SELECT
+    'ACTUAL_TRACKING_SUMMARY' AS ValidationSection,
+    FSBType,
+    CandidateType,
+    COUNT(*) AS Qty
+FROM #V_ActualTrackings
+GROUP BY
+    FSBType,
+    CandidateType
+ORDER BY
+    FSBType,
+    CandidateType;
+
+-------------------------------------------------------------------------------
+-- 10. Tracking detail mismatches
+-------------------------------------------------------------------------------
+
+SELECT
+    'MISSING_TRACKING' AS ValidationSection,
+    e.*
+FROM #V_ExpectedTrackings e
+LEFT JOIN #V_ActualTrackings a
     ON a.PromotionID = e.PromotionID
    AND a.SponsorID = e.SponsorID
    AND a.PromoterID = e.PromoterID
@@ -866,56 +1329,15 @@ WHERE a.OrderID IS NULL
 ORDER BY
     e.SponsorID,
     e.SponsorFSB1Start,
-    CASE e.FSBType
-        WHEN 'FSB1' THEN 1
-        WHEN 'FSB1_EXT' THEN 2
-        WHEN 'FSB2' THEN 3
-        WHEN 'FSB3' THEN 4
-        ELSE 99
-    END,
-    e.OrderDate,
-    e.OrderID;
-
--------------------------------------------------------------------------------
--- 11. Detail: sponsors that have expected rows but no actual tracking rows at all.
--------------------------------------------------------------------------------
+    e.FSBType,
+    e.OrderID,
+    e.PromoterID;
 
 SELECT
-    'SPONSOR_WITH_EXPECTED_ROWS_BUT_ZERO_TRACKING' AS Issue,
-    e.PromotionID,
-    e.SponsorID,
-    e.SponsorFSB1Start,
-    COUNT(*) AS ExpectedRows
-FROM #V_Expected e
-LEFT JOIN
-(
-    SELECT DISTINCT
-        PromotionID,
-        SponsorID,
-        SponsorFSB1Start
-    FROM #V_Actual
-) a
-    ON a.PromotionID = e.PromotionID
-   AND a.SponsorID = e.SponsorID
-   AND a.SponsorFSB1Start = e.SponsorFSB1Start
-WHERE a.SponsorID IS NULL
-GROUP BY
-    e.PromotionID,
-    e.SponsorID,
-    e.SponsorFSB1Start
-ORDER BY
-    e.SponsorID,
-    e.SponsorFSB1Start;
-
--------------------------------------------------------------------------------
--- 12. Detail: rows present in dbo.FSBTrackings that are not expected.
--------------------------------------------------------------------------------
-
-SELECT
-    'EXTRA_IN_FSBTRACKINGS' AS Issue,
+    'EXTRA_TRACKING' AS ValidationSection,
     a.*
-FROM #V_Actual a
-LEFT JOIN #V_Expected e
+FROM #V_ActualTrackings a
+LEFT JOIN #V_ExpectedTrackings e
     ON e.PromotionID = a.PromotionID
    AND e.SponsorID = a.SponsorID
    AND e.PromoterID = a.PromoterID
@@ -926,227 +1348,74 @@ WHERE e.OrderID IS NULL
 ORDER BY
     a.SponsorID,
     a.SponsorFSB1Start,
-    CASE a.FSBType
-        WHEN 'FSB1' THEN 1
-        WHEN 'FSB1_EXT' THEN 2
-        WHEN 'FSB2' THEN 3
-        WHEN 'FSB3' THEN 4
-        ELSE 99
-    END,
-    a.OrderDate,
-    a.OrderID;
-
--------------------------------------------------------------------------------
--- 13. Detail: same key exists but window dates are different.
--------------------------------------------------------------------------------
+    a.FSBType,
+    a.OrderID,
+    a.PromoterID;
 
 SELECT
-    'DATE_MISMATCH' AS Issue,
+    'TRACKING_PAYLOAD_MISMATCH' AS ValidationSection,
     e.PromotionID,
     e.SponsorID,
+    e.SponsorFSB1Start,
+    e.FSBType,
     e.PromoterID,
     e.OrderID,
-    e.FSBType,
-    e.SponsorFSB1Start,
+
+    e.CustomerID AS ExpectedCustomerID,
+    a.CustomerID AS ActualCustomerID,
+
+    e.ParticipantUserID AS ExpectedParticipantUserID,
+    a.ParticipantUserID AS ActualParticipantUserID,
+
+    e.CandidateType AS ExpectedCandidateType,
+    a.CandidateType AS ActualCandidateType,
+
     e.SponsorFSB1End AS ExpectedSponsorFSB1End,
     a.SponsorFSB1End AS ActualSponsorFSB1End,
+
     e.SponsorFSB1ExtEnd AS ExpectedSponsorFSB1ExtEnd,
     a.SponsorFSB1ExtEnd AS ActualSponsorFSB1ExtEnd,
+
     e.SponsorFSB2Start AS ExpectedSponsorFSB2Start,
     a.SponsorFSB2Start AS ActualSponsorFSB2Start,
+
     e.SponsorFSB2End AS ExpectedSponsorFSB2End,
     a.SponsorFSB2End AS ActualSponsorFSB2End,
+
     e.SponsorFSB3Start AS ExpectedSponsorFSB3Start,
     a.SponsorFSB3Start AS ActualSponsorFSB3Start,
+
     e.SponsorFSB3End AS ExpectedSponsorFSB3End,
-    a.SponsorFSB3End AS ActualSponsorFSB3End
-FROM #V_Expected e
-INNER JOIN #V_Actual a
+    a.SponsorFSB3End AS ActualSponsorFSB3End,
+
+    e.FirstRPHID AS ExpectedFirstRPHID,
+    a.FirstRPHID AS ActualFirstRPHID,
+
+    e.SecondRPHID AS ExpectedSecondRPHID,
+    a.SecondRPHID AS ActualSecondRPHID
+FROM #V_ExpectedTrackings e
+INNER JOIN #V_ActualTrackings a
     ON a.PromotionID = e.PromotionID
    AND a.SponsorID = e.SponsorID
    AND a.PromoterID = e.PromoterID
    AND a.OrderID = e.OrderID
    AND a.FSBType = e.FSBType
    AND a.SponsorFSB1Start = e.SponsorFSB1Start
-WHERE ISNULL(a.SponsorFSB1End, @NullDate) <> ISNULL(e.SponsorFSB1End, @NullDate)
-   OR ISNULL(a.SponsorFSB1ExtEnd, @NullDate) <> ISNULL(e.SponsorFSB1ExtEnd, @NullDate)
-   OR ISNULL(a.SponsorFSB2Start, @NullDate) <> ISNULL(e.SponsorFSB2Start, @NullDate)
-   OR ISNULL(a.SponsorFSB2End, @NullDate) <> ISNULL(e.SponsorFSB2End, @NullDate)
-   OR ISNULL(a.SponsorFSB3Start, @NullDate) <> ISNULL(e.SponsorFSB3Start, @NullDate)
-   OR ISNULL(a.SponsorFSB3End, @NullDate) <> ISNULL(e.SponsorFSB3End, @NullDate)
+WHERE
+       ISNULL(a.CustomerID, -1) <> ISNULL(e.CustomerID, -1)
+    OR ISNULL(a.ParticipantUserID, -1) <> ISNULL(e.ParticipantUserID, -1)
+    OR ISNULL(a.CandidateType, '') <> ISNULL(e.CandidateType, '')
+    OR ISNULL(a.SponsorFSB1End, @NullDate) <> ISNULL(e.SponsorFSB1End, @NullDate)
+    OR ISNULL(a.SponsorFSB1ExtEnd, @NullDate) <> ISNULL(e.SponsorFSB1ExtEnd, @NullDate)
+    OR ISNULL(a.SponsorFSB2Start, @NullDate) <> ISNULL(e.SponsorFSB2Start, @NullDate)
+    OR ISNULL(a.SponsorFSB2End, @NullDate) <> ISNULL(e.SponsorFSB2End, @NullDate)
+    OR ISNULL(a.SponsorFSB3Start, @NullDate) <> ISNULL(e.SponsorFSB3Start, @NullDate)
+    OR ISNULL(a.SponsorFSB3End, @NullDate) <> ISNULL(e.SponsorFSB3End, @NullDate)
+    OR ISNULL(a.FirstRPHID, -1) <> ISNULL(e.FirstRPHID, -1)
+    OR ISNULL(a.SecondRPHID, -1) <> ISNULL(e.SecondRPHID, -1)
 ORDER BY
     e.SponsorID,
     e.SponsorFSB1Start,
     e.FSBType,
-    e.OrderDate,
-    e.OrderID;
-
--------------------------------------------------------------------------------
--- 14. Rule checks on actual dbo.FSBTrackings.
--------------------------------------------------------------------------------
-
--- Informational: number of tracking rows per sponsor/cycle/type.
--- Counts can be 1+ because dbo.FSBTrackings now stores partial windows and,
--- for FSB1_EXT/FSB3, all valid orders inside the evaluated window. Commission
--- generation applies the >= 2 promoter rule.
-SELECT
-    'TRACKING_GROUP_COUNTS' AS Info,
-    PromotionID,
-    SponsorID,
-    SponsorFSB1Start,
-    FSBType,
-    COUNT(*) AS ActualRows,
-    CASE WHEN COUNT(DISTINCT PromoterID) >= 2 THEN 1 ELSE 0 END AS HasAtLeast2Promoters
-FROM #V_Actual
-GROUP BY
-    PromotionID,
-    SponsorID,
-    SponsorFSB1Start,
-    FSBType
-ORDER BY
-    SponsorID,
-    SponsorFSB1Start,
-    FSBType;
-
--- No duplicate tracking rows for the same business key.
-SELECT
-    'DUPLICATE_TRACKING_KEY' AS Issue,
-    PromotionID,
-    SponsorID,
-    PromoterID,
-    OrderID,
-    FSBType,
-    SponsorFSB1Start,
-    COUNT(*) AS DuplicateCount
-FROM #V_Actual
-GROUP BY
-    PromotionID,
-    SponsorID,
-    PromoterID,
-    OrderID,
-    FSBType,
-    SponsorFSB1Start
-HAVING COUNT(*) > 1
-ORDER BY
-    SponsorID,
-    SponsorFSB1Start,
-    FSBType,
-    OrderID;
-
--- A promoter should not be counted more than once in the same sponsor FSB cycle.
-SELECT
-    'PROMOTER_COUNTED_MORE_THAN_ONCE_IN_CYCLE' AS Issue,
-    PromotionID,
-    SponsorID,
-    SponsorFSB1Start,
-    PromoterID,
-    COUNT(*) AS TimesCounted,
-    MIN(FSBType) AS FirstFSBTypeSeen,
-    MAX(FSBType) AS LastFSBTypeSeen,
-    MIN(OrderID) AS FirstOrderIDSeen,
-    MAX(OrderID) AS LastOrderIDSeen
-FROM #V_Actual
-GROUP BY
-    PromotionID,
-    SponsorID,
-    SponsorFSB1Start,
-    PromoterID
-HAVING COUNT(*) > 1
-ORDER BY
-    SponsorID,
-    SponsorFSB1Start,
-    PromoterID;
-
--- FSB2 requires regular FSB1, not FSB1_EXT.
-;WITH ActualCounts AS
-(
-    SELECT
-        PromotionID,
-        SponsorID,
-        SponsorFSB1Start,
-        SUM(CASE WHEN FSBType = 'FSB1' THEN 1 ELSE 0 END) AS FSB1Rows,
-        SUM(CASE WHEN FSBType = 'FSB1_EXT' THEN 1 ELSE 0 END) AS FSB1ExtRows,
-        SUM(CASE WHEN FSBType = 'FSB2' THEN 1 ELSE 0 END) AS FSB2Rows,
-        SUM(CASE WHEN FSBType = 'FSB3' THEN 1 ELSE 0 END) AS FSB3Rows
-    FROM #V_Actual
-    GROUP BY
-        PromotionID,
-        SponsorID,
-        SponsorFSB1Start
-)
-SELECT
-    'FSB2_OR_FSB3_WITHOUT_REQUIRED_PRIOR_WINDOWS' AS Issue,
-    *
-FROM ActualCounts
-WHERE (FSB2Rows > 0 AND FSB1Rows <> 2)
-   OR (FSB3Rows > 0 AND (FSB1Rows <> 2 OR FSB2Rows <> 2))
-   OR (FSB1ExtRows > 0 AND (FSB2Rows > 0 OR FSB3Rows > 0))
-ORDER BY
-    SponsorID,
-    SponsorFSB1Start;
-
--------------------------------------------------------------------------------
--- 15. Sponsor-level expected vs actual counts.
--------------------------------------------------------------------------------
-
-;WITH ExpectedAgg AS
-(
-    SELECT
-        PromotionID,
-        SponsorID,
-        SponsorFSB1Start,
-        SUM(CASE WHEN FSBType = 'FSB1' THEN 1 ELSE 0 END) AS ExpectedFSB1,
-        SUM(CASE WHEN FSBType = 'FSB1_EXT' THEN 1 ELSE 0 END) AS ExpectedFSB1Ext,
-        SUM(CASE WHEN FSBType = 'FSB2' THEN 1 ELSE 0 END) AS ExpectedFSB2,
-        SUM(CASE WHEN FSBType = 'FSB3' THEN 1 ELSE 0 END) AS ExpectedFSB3,
-        COUNT(*) AS ExpectedTotal
-    FROM #V_Expected
-    GROUP BY
-        PromotionID,
-        SponsorID,
-        SponsorFSB1Start
-),
-ActualAgg AS
-(
-    SELECT
-        PromotionID,
-        SponsorID,
-        SponsorFSB1Start,
-        SUM(CASE WHEN FSBType = 'FSB1' THEN 1 ELSE 0 END) AS ActualFSB1,
-        SUM(CASE WHEN FSBType = 'FSB1_EXT' THEN 1 ELSE 0 END) AS ActualFSB1Ext,
-        SUM(CASE WHEN FSBType = 'FSB2' THEN 1 ELSE 0 END) AS ActualFSB2,
-        SUM(CASE WHEN FSBType = 'FSB3' THEN 1 ELSE 0 END) AS ActualFSB3,
-        COUNT(*) AS ActualTotal
-    FROM #V_Actual
-    GROUP BY
-        PromotionID,
-        SponsorID,
-        SponsorFSB1Start
-)
-SELECT
-    COALESCE(e.PromotionID, a.PromotionID) AS PromotionID,
-    COALESCE(e.SponsorID, a.SponsorID) AS SponsorID,
-    COALESCE(e.SponsorFSB1Start, a.SponsorFSB1Start) AS SponsorFSB1Start,
-    ISNULL(e.ExpectedFSB1, 0) AS ExpectedFSB1,
-    ISNULL(a.ActualFSB1, 0) AS ActualFSB1,
-    ISNULL(e.ExpectedFSB1Ext, 0) AS ExpectedFSB1Ext,
-    ISNULL(a.ActualFSB1Ext, 0) AS ActualFSB1Ext,
-    ISNULL(e.ExpectedFSB2, 0) AS ExpectedFSB2,
-    ISNULL(a.ActualFSB2, 0) AS ActualFSB2,
-    ISNULL(e.ExpectedFSB3, 0) AS ExpectedFSB3,
-    ISNULL(a.ActualFSB3, 0) AS ActualFSB3,
-    ISNULL(e.ExpectedTotal, 0) AS ExpectedTotal,
-    ISNULL(a.ActualTotal, 0) AS ActualTotal
-FROM ExpectedAgg e
-FULL OUTER JOIN ActualAgg a
-    ON a.PromotionID = e.PromotionID
-   AND a.SponsorID = e.SponsorID
-   AND a.SponsorFSB1Start = e.SponsorFSB1Start
-WHERE ISNULL(e.ExpectedFSB1, 0) <> ISNULL(a.ActualFSB1, 0)
-   OR ISNULL(e.ExpectedFSB1Ext, 0) <> ISNULL(a.ActualFSB1Ext, 0)
-   OR ISNULL(e.ExpectedFSB2, 0) <> ISNULL(a.ActualFSB2, 0)
-   OR ISNULL(e.ExpectedFSB3, 0) <> ISNULL(a.ActualFSB3, 0)
-   OR ISNULL(e.ExpectedTotal, 0) <> ISNULL(a.ActualTotal, 0)
-ORDER BY
-    SponsorID,
-    SponsorFSB1Start;
+    e.OrderID,
+    e.PromoterID;

@@ -71,6 +71,9 @@ BEGIN
 
                 ft.FSBTrackingID,
                 ft.PromoterID,
+                ft.CustomerID,
+                ft.ParticipantUserID,
+                ft.CandidateType,
                 ft.OrderID,
                 o.OrderDate,
 
@@ -179,6 +182,9 @@ BEGIN
 
             FSBTrackingID,
             PromoterID,
+            CustomerID,
+            ParticipantUserID,
+            CandidateType,
             OrderID,
             OrderDate,
 

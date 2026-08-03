@@ -47,6 +47,59 @@ BEGIN
 END;
 GO
 
+IF OBJECT_ID('dbo.FSBCandidates', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.FSBCandidates
+    (
+        FSBCandidateID BIGINT IDENTITY(1,1) NOT NULL,
+        CreatedAt DATETIME NOT NULL CONSTRAINT DF_FSBCandidates_CreatedAt DEFAULT(GETDATE()),
+
+        PromotionID BIGINT NOT NULL,
+        SponsorID BIGINT NOT NULL,
+        SponsorUserID BIGINT NOT NULL,
+        SponsorFSB1Start DATETIME NOT NULL,
+
+        CandidateKey BIGINT NOT NULL,
+        CandidateType VARCHAR(20) NOT NULL,
+
+        PromoterID BIGINT NULL,
+        CustomerID BIGINT NOT NULL,
+        ParticipantUserID BIGINT NOT NULL,
+
+        OrderID BIGINT NOT NULL,
+        OrderDate DATETIME NOT NULL,
+        ProductID INT NOT NULL,
+        OrderStatus VARCHAR(20) NOT NULL,
+
+        IsExcludedProduct BIT NOT NULL,
+        IsStaticEligible BIT NOT NULL,
+        StaticEligibilityReason VARCHAR(200) NULL,
+
+        IsEliteTravelAdvantagePro BIT NULL,
+        IsPromoCouponApplied BIT NULL,
+        IsPermanentPromoCouponApplied BIT NULL,
+        FreeCommission BIT NULL,
+        IsDagCustomer BIT NULL,
+        IsCreatedWithPromoPrice BIT NULL,
+
+        CONSTRAINT PK_FSBCandidates PRIMARY KEY CLUSTERED (FSBCandidateID),
+
+        CONSTRAINT CK_FSBCandidates_CandidateType
+        CHECK (CandidateType IN ('PROMOTER', 'CUSTOMER')),
+
+        CONSTRAINT UQ_FSBCandidates
+        UNIQUE
+        (
+            PromotionID,
+            SponsorID,
+            SponsorFSB1Start,
+            CandidateType,
+            OrderID
+        )
+    );
+END;
+GO
+
 IF OBJECT_ID('dbo.FSBTrackings', 'U') IS NULL
 BEGIN
     CREATE TABLE dbo.FSBTrackings
@@ -58,6 +111,9 @@ BEGIN
 
         SponsorID BIGINT NOT NULL,
         PromoterID BIGINT NOT NULL,
+        CustomerID BIGINT NOT NULL,
+        ParticipantUserID BIGINT NOT NULL,
+        CandidateType VARCHAR(20) NOT NULL,
         OrderID BIGINT NOT NULL,
 
         FSBType VARCHAR(20) NOT NULL,
@@ -78,7 +134,10 @@ BEGIN
         CONSTRAINT PK_FSBTrackings PRIMARY KEY CLUSTERED (FSBTrackingID),
 
         CONSTRAINT CK_FSBTrackings_FSBType
-        CHECK (FSBType IN ('FSB1', 'FSB1_EXT', 'FSB2', 'FSB3')),
+        CHECK (FSBType IN ('FSB1', 'FSB1_EXT', 'FSB2', 'FSB3', 'NO_FSB')),
+
+        CONSTRAINT CK_FSBTrackings_CandidateType
+        CHECK (CandidateType IN ('PROMOTER', 'CUSTOMER')),
 
         CONSTRAINT UQ_FSBTrackings
         UNIQUE
@@ -119,7 +178,7 @@ BEGIN
         CONSTRAINT PK_FSBCommission PRIMARY KEY CLUSTERED (FSBCommissionID),
 
         CONSTRAINT CK_FSBCommission_FSBType
-        CHECK (FSBType IN ('FSB1', 'FSB1_EXT', 'FSB2', 'FSB3')),
+        CHECK (FSBType IN ('FSB1', 'FSB2', 'FSB3')),
 
         CONSTRAINT CK_FSBCommission_HalfType
         CHECK (HalfType IN ('FIRST', 'SECOND')),
@@ -195,9 +254,67 @@ BEGIN
     INCLUDE
     (
         PromoterID,
+        CustomerID,
+        ParticipantUserID,
+        CandidateType,
         OrderID,
         SecondRPHID,
         CreatedAt
+    );
+END;
+GO
+
+IF NOT EXISTS
+(
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'IX_FSBCandidates_Sponsor_Cycle_Type'
+      AND object_id = OBJECT_ID('dbo.FSBCandidates')
+)
+BEGIN
+    CREATE INDEX IX_FSBCandidates_Sponsor_Cycle_Type
+    ON dbo.FSBCandidates
+    (
+        PromotionID,
+        SponsorID,
+        SponsorFSB1Start,
+        CandidateType,
+        IsStaticEligible,
+        CandidateKey
+    )
+    INCLUDE
+    (
+        PromoterID,
+        CustomerID,
+        ParticipantUserID,
+        OrderID,
+        OrderDate,
+        ProductID,
+        OrderStatus,
+        StaticEligibilityReason
+    );
+END;
+GO
+
+IF NOT EXISTS
+(
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'IX_FSBCandidates_Order'
+      AND object_id = OBJECT_ID('dbo.FSBCandidates')
+)
+BEGIN
+    CREATE INDEX IX_FSBCandidates_Order
+    ON dbo.FSBCandidates
+    (
+        OrderID,
+        PromotionID
+    )
+    INCLUDE
+    (
+        SponsorID,
+        SponsorFSB1Start,
+        CandidateType,
+        CandidateKey,
+        IsStaticEligible
     );
 END;
 GO
@@ -213,6 +330,7 @@ BEGIN
     ON dbo.FSBTrackings
     (
         PromotionID,
+        CandidateType,
         PromoterID,
         OrderID,
         SponsorFSB1Start

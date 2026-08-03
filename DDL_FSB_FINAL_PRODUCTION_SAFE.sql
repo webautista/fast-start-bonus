@@ -88,9 +88,85 @@ GO
 
 
 -------------------------------------------------------------------------------
--- 3. dbo.FSBTrackings
+-- 3. dbo.FSBCandidates
+-- Complete auditable candidate universe at order level.
+-------------------------------------------------------------------------------
+
+IF OBJECT_ID('dbo.FSBCandidates', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.FSBCandidates
+    (
+        FSBCandidateID BIGINT IDENTITY(1,1) NOT NULL,
+        CreatedAt DATETIME NOT NULL CONSTRAINT DF_FSBCandidates_CreatedAt DEFAULT(GETDATE()),
+
+        PromotionID BIGINT NOT NULL,
+        SponsorID BIGINT NOT NULL,
+        SponsorUserID BIGINT NOT NULL,
+        SponsorFSB1Start DATETIME NOT NULL,
+
+        CandidateKey BIGINT NOT NULL,
+        CandidateType VARCHAR(20) NOT NULL,
+
+        PromoterID BIGINT NULL,
+        CustomerID BIGINT NOT NULL,
+        ParticipantUserID BIGINT NOT NULL,
+
+        OrderID BIGINT NOT NULL,
+        OrderDate DATETIME NOT NULL,
+        ProductID INT NOT NULL,
+        OrderStatus VARCHAR(20) NOT NULL,
+
+        IsExcludedProduct BIT NOT NULL,
+        IsStaticEligible BIT NOT NULL,
+        StaticEligibilityReason VARCHAR(200) NULL,
+
+        IsEliteTravelAdvantagePro BIT NULL,
+        IsPromoCouponApplied BIT NULL,
+        IsPermanentPromoCouponApplied BIT NULL,
+        FreeCommission BIT NULL,
+        IsDagCustomer BIT NULL,
+        IsCreatedWithPromoPrice BIT NULL,
+
+        CONSTRAINT PK_FSBCandidates PRIMARY KEY CLUSTERED (FSBCandidateID),
+
+        CONSTRAINT CK_FSBCandidates_CandidateType
+        CHECK (CandidateType IN ('PROMOTER', 'CUSTOMER')),
+
+        CONSTRAINT UQ_FSBCandidates
+        UNIQUE
+        (
+            PromotionID,
+            SponsorID,
+            SponsorFSB1Start,
+            CandidateType,
+            OrderID
+        )
+    );
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBCandidates', 'U') IS NOT NULL
+   AND OBJECT_ID('dbo.Promotions', 'U') IS NOT NULL
+   AND NOT EXISTS
+   (
+       SELECT 1
+       FROM sys.foreign_keys
+       WHERE name = 'FK_FSBCandidates_Promotions'
+         AND parent_object_id = OBJECT_ID('dbo.FSBCandidates')
+   )
+BEGIN
+    ALTER TABLE dbo.FSBCandidates WITH CHECK
+    ADD CONSTRAINT FK_FSBCandidates_Promotions
+    FOREIGN KEY (PromotionID)
+    REFERENCES dbo.Promotions(PromotionID);
+END;
+GO
+
+
+-------------------------------------------------------------------------------
+-- 4. dbo.FSBTrackings
 -- Historical tracking table.
--- Stores FSB1, FSB1_EXT, FSB2, FSB3 classifications.
+-- Stores FSB1, FSB1_EXT, FSB2, FSB3 and NO_FSB classifications.
 -- FirstRPHID = first SUCCESS payment by RPH.CreateDate.
 -- SecondRPHID = second SUCCESS payment by RPH.CreateDate.
 -------------------------------------------------------------------------------
@@ -106,6 +182,9 @@ BEGIN
 
         SponsorID BIGINT NOT NULL,
         PromoterID BIGINT NOT NULL,
+        CustomerID BIGINT NOT NULL,
+        ParticipantUserID BIGINT NOT NULL,
+        CandidateType VARCHAR(20) NOT NULL,
         OrderID BIGINT NOT NULL,
 
         FSBType VARCHAR(20) NOT NULL,
@@ -126,7 +205,10 @@ BEGIN
         CONSTRAINT PK_FSBTrackings PRIMARY KEY CLUSTERED (FSBTrackingID),
 
         CONSTRAINT CK_FSBTrackings_FSBType
-        CHECK (FSBType IN ('FSB1', 'FSB1_EXT', 'FSB2', 'FSB3')),
+        CHECK (FSBType IN ('FSB1', 'FSB1_EXT', 'FSB2', 'FSB3', 'NO_FSB')),
+
+        CONSTRAINT CK_FSBTrackings_CandidateType
+        CHECK (CandidateType IN ('PROMOTER', 'CUSTOMER')),
 
         CONSTRAINT UQ_FSBTrackings
         UNIQUE
@@ -139,6 +221,94 @@ BEGIN
             SponsorFSB1Start
         )
     );
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBTrackings', 'U') IS NOT NULL
+   AND COL_LENGTH('dbo.FSBTrackings', 'CustomerID') IS NULL
+BEGIN
+    ALTER TABLE dbo.FSBTrackings
+    ADD CustomerID BIGINT NULL;
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBTrackings', 'U') IS NOT NULL
+   AND EXISTS
+   (
+       SELECT 1
+       FROM sys.check_constraints
+       WHERE name = 'CK_FSBTrackings_FSBType'
+         AND parent_object_id = OBJECT_ID('dbo.FSBTrackings')
+   )
+BEGIN
+    ALTER TABLE dbo.FSBTrackings
+    DROP CONSTRAINT CK_FSBTrackings_FSBType;
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBTrackings', 'U') IS NOT NULL
+   AND NOT EXISTS
+   (
+       SELECT 1
+       FROM sys.check_constraints
+       WHERE name = 'CK_FSBTrackings_FSBType'
+         AND parent_object_id = OBJECT_ID('dbo.FSBTrackings')
+   )
+BEGIN
+    ALTER TABLE dbo.FSBTrackings WITH CHECK
+    ADD CONSTRAINT CK_FSBTrackings_FSBType
+    CHECK (FSBType IN ('FSB1', 'FSB1_EXT', 'FSB2', 'FSB3', 'NO_FSB'));
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBTrackings', 'U') IS NOT NULL
+   AND COL_LENGTH('dbo.FSBTrackings', 'ParticipantUserID') IS NULL
+BEGIN
+    ALTER TABLE dbo.FSBTrackings
+    ADD ParticipantUserID BIGINT NULL;
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBTrackings', 'U') IS NOT NULL
+   AND COL_LENGTH('dbo.FSBTrackings', 'CandidateType') IS NULL
+BEGIN
+    ALTER TABLE dbo.FSBTrackings
+    ADD CandidateType VARCHAR(20) NULL;
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBTrackings', 'U') IS NOT NULL
+   AND OBJECT_ID('dbo.MWRCustomers', 'U') IS NOT NULL
+   AND OBJECT_ID('dbo.Promoters', 'U') IS NOT NULL
+BEGIN
+    UPDATE ft
+       SET
+           CustomerID = ISNULL(ft.CustomerID, c.CustomerID),
+           ParticipantUserID = ISNULL(ft.ParticipantUserID, c.UserID),
+           CandidateType = ISNULL(ft.CandidateType, 'PROMOTER')
+    FROM dbo.FSBTrackings ft
+    INNER JOIN dbo.Promoters p
+        ON p.PromoterID = ft.PromoterID
+    INNER JOIN dbo.MWRCustomers c
+        ON c.UserID = p.UserProfileID
+    WHERE ft.CustomerID IS NULL
+       OR ft.ParticipantUserID IS NULL
+       OR ft.CandidateType IS NULL;
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBTrackings', 'U') IS NOT NULL
+   AND NOT EXISTS
+   (
+       SELECT 1
+       FROM sys.check_constraints
+       WHERE name = 'CK_FSBTrackings_CandidateType'
+         AND parent_object_id = OBJECT_ID('dbo.FSBTrackings')
+   )
+BEGIN
+    ALTER TABLE dbo.FSBTrackings WITH CHECK
+    ADD CONSTRAINT CK_FSBTrackings_CandidateType
+    CHECK (CandidateType IN ('PROMOTER', 'CUSTOMER'));
 END;
 GO
 
@@ -350,6 +520,65 @@ GO
 -- 6. FSB INTERNAL INDEXES
 -------------------------------------------------------------------------------
 
+IF OBJECT_ID('dbo.FSBCandidates', 'U') IS NOT NULL
+   AND NOT EXISTS
+   (
+       SELECT 1
+       FROM sys.indexes
+       WHERE name = 'IX_FSBCandidates_Sponsor_Cycle_Type'
+         AND object_id = OBJECT_ID('dbo.FSBCandidates')
+   )
+BEGIN
+    CREATE INDEX IX_FSBCandidates_Sponsor_Cycle_Type
+    ON dbo.FSBCandidates
+    (
+        PromotionID,
+        SponsorID,
+        SponsorFSB1Start,
+        CandidateType,
+        IsStaticEligible,
+        CandidateKey
+    )
+    INCLUDE
+    (
+        PromoterID,
+        CustomerID,
+        ParticipantUserID,
+        OrderID,
+        OrderDate,
+        ProductID,
+        OrderStatus,
+        StaticEligibilityReason
+    );
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBCandidates', 'U') IS NOT NULL
+   AND NOT EXISTS
+   (
+       SELECT 1
+       FROM sys.indexes
+       WHERE name = 'IX_FSBCandidates_Order'
+         AND object_id = OBJECT_ID('dbo.FSBCandidates')
+   )
+BEGIN
+    CREATE INDEX IX_FSBCandidates_Order
+    ON dbo.FSBCandidates
+    (
+        OrderID,
+        PromotionID
+    )
+    INCLUDE
+    (
+        SponsorID,
+        SponsorFSB1Start,
+        CandidateType,
+        CandidateKey,
+        IsStaticEligible
+    );
+END;
+GO
+
 IF OBJECT_ID('dbo.FSBTrackings', 'U') IS NOT NULL
    AND NOT EXISTS
    (
@@ -370,6 +599,9 @@ BEGIN
     INCLUDE
     (
         PromoterID,
+        CustomerID,
+        ParticipantUserID,
+        CandidateType,
         OrderID,
         FirstRPHID,
         SecondRPHID,
@@ -391,6 +623,7 @@ BEGIN
     ON dbo.FSBTrackings
     (
         PromotionID,
+        CandidateType,
         PromoterID,
         OrderID,
         SponsorFSB1Start
@@ -417,6 +650,9 @@ BEGIN
     (
         SponsorID,
         PromoterID,
+        CustomerID,
+        ParticipantUserID,
+        CandidateType,
         FSBType,
         SponsorFSB1Start,
         FirstRPHID,
