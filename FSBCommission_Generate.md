@@ -2,7 +2,7 @@
 
 ## Proposito
 
-Generar cabeceras y detalles de comision FSB a partir de `dbo.FSBTrackings`, tanto para `FIRST` como para `SECOND`, respetando la regla de renewals validos.
+Generar cabeceras y detalles de comision FSB a partir de `dbo.FSBTrackings`, respetando la elegibilidad de primera mitad y la regla de renewals validos para segunda mitad.
 
 ## Parametros
 
@@ -11,40 +11,92 @@ Generar cabeceras y detalles de comision FSB a partir de `dbo.FSBTrackings`, tan
 
 ## Flujo implementado
 
-1. Abre transaccion y toma un `sp_getapplock` por promocion.
-2. Calcula elegibilidad de `FIRST` usando conteo de promoters distintos por grupo:
-   - `FSB1` normal con al menos 2 promoters.
-   - `FSB1_EXT` puede otorgar cabecera `FSB1` si tiene al menos 2 y no existe `FSB1` normal.
-   - `FSB2` exige `FSB1` normal previo y al menos 2 promoters en tracking `FSB2`.
-   - `FSB3` exige `FSB2` elegible y al menos 2 promoters en tracking `FSB3`.
-3. Inserta cabeceras `FIRST` en `dbo.FSBCommission` si no existen.
-4. Inserta detalles `FIRST` en `dbo.FSBCommissionDetail`:
-   - Para `FSB1`, usa filas `FSB1` normales o `FSB1_EXT` si la extension fue la que califico.
-   - Para `FSB2` y `FSB3`, usa solo los trackings de su grupo.
-5. Evalua renewals validos por tracking:
-   - Revisa `FirstRPHID` y `SecondRPHID`.
-   - Renewal valido = pago `SUCCESS` no revertido entre 1 y 44 dias desde `OrderDate`.
-6. Cuenta renewals validos por grupo de `FIRST`.
-7. Calcula elegibilidad de `SECOND`:
-   - `FSB1 SECOND`: al menos 2 renewals validos del grupo FSB1.
-   - `FSB2 SECOND`: al menos 2 renewals validos de FSB1 y al menos 2 de FSB2.
-   - `FSB3 SECOND`: al menos 2 renewals validos de FSB1, FSB2 y FSB3.
-8. Inserta cabeceras `SECOND` si no existen.
-9. Inserta detalles `SECOND`:
-   - Solo trackings que ya estaban en `FIRST`.
-   - Solo promoters con renewal valido.
-   - `FSB2 SECOND` arrastra renovados de `FSB1` y `FSB2`.
-   - `FSB3 SECOND` arrastra renovados de `FSB1`, `FSB2` y `FSB3`.
+1. Abre transaccion y toma `sp_getapplock` por promocion.
+2. Calcula grupos elegibles de `FIRST` usando `COUNT(DISTINCT ft.PromoterID)`.
+3. Inserta cabeceras `FIRST` faltantes en `dbo.FSBCommission`.
+4. Inserta detalles `FIRST` faltantes en `dbo.FSBCommissionDetail`.
+5. Calcula renewals validos por tracking usando `FirstRPHID` y `SecondRPHID`.
+6. Cuenta renewals validos por grupo `FIRST`.
+7. Calcula elegibilidad de `SECOND`.
+8. Inserta cabeceras `SECOND` faltantes.
+9. Inserta detalles `SECOND` faltantes.
 
-## Reglas de negocio clave
+## Regla de primera mitad
 
-- `FSB1_EXT` nunca se guarda como cabecera de comision; se transforma en `FSB1`.
-- `FIRST` guarda todos los promoters validos del grupo.
-- `SECOND` guarda solo promoters con renewal valido.
-- La elegibilidad se basa en `COUNT(DISTINCT PromoterID)`.
-- El procedimiento es idempotente gracias a `NOT EXISTS` con locks de actualizacion.
+### FSB1
 
-## Tablas y dependencias
+- Elegible si existen al menos 2 participantes distintos en tracking `FSB1`.
+
+### FSB1 por extension
+
+- Si no existe `FSB1` normal elegible, `FSB1_EXT` puede otorgar comision `FSB1`.
+- `FSB1_EXT` nunca crea cabecera con tipo `FSB1_EXT`.
+
+### FSB2
+
+- Requiere `FSB1` normal elegible.
+- Requiere al menos 2 participantes distintos en tracking `FSB2`.
+
+### FSB3
+
+- Requiere `FSB2` elegible.
+- Requiere al menos 2 participantes distintos en tracking `FSB3`.
+
+## Regla de renewal valido
+
+Un renewal es valido si:
+
+- el pago es `SUCCESS`
+- no esta revertido
+- su `CreateDate` esta entre 1 y 44 dias desde `OrderDate`
+
+Importante:
+
+- se usa `RecurringPaymentsHistory.CreateDate`
+- no se usa `PaymentMade`
+
+## Regla de segunda mitad
+
+### FSB1 SECOND
+
+- minimo 2 renewals validos del grupo `FSB1`
+
+### FSB2 SECOND
+
+- minimo 2 renewals validos del grupo `FSB1`
+- minimo 2 renewals validos del grupo `FSB2`
+
+### FSB3 SECOND
+
+- minimo 2 renewals validos del grupo `FSB1`
+- minimo 2 renewals validos del grupo `FSB2`
+- minimo 2 renewals validos del grupo `FSB3`
+
+## Detalles que inserta
+
+### FIRST
+
+- Guarda todos los trackings validos del grupo ganador.
+- Si `FSB1` vino por extension, usa filas `FSB1_EXT` pero la cabecera oficial es `FSB1`.
+
+### SECOND
+
+- Guarda solo trackings con renewal valido.
+- `FSB2 SECOND` puede incluir detalles renovados de `FSB1` y `FSB2`.
+- `FSB3 SECOND` puede incluir detalles renovados de `FSB1`, `FSB2` y `FSB3`.
+
+## Interaccion con customers
+
+El procedimiento sigue contando `COUNT(DISTINCT ft.PromoterID)`.  
+Para rows `CUSTOMER`, `FSBTrackings_Load` ya persistio una clave sintetica negativa en `PromoterID`, por lo que customers tambien participan en los conteos sin romper la logica existente.
+
+## Que no hace
+
+- No genera comisiones para `NO_FSB`.
+- No crea cabeceras `FSB1_EXT`.
+- No recalcula tracking; asume que `dbo.FSBTrackings` ya fue refrescada.
+
+## Dependencias
 
 - `dbo.FSBTrackings`
 - `dbo.FSBCommission`
@@ -54,4 +106,4 @@ Generar cabeceras y detalles de comision FSB a partir de `dbo.FSBTrackings`, tan
 
 ## Resultado esperado
 
-Deja `dbo.FSBCommission` y `dbo.FSBCommissionDetail` sincronizadas con el tracking actual y con la politica de renewal de la promocion.
+Deja `dbo.FSBCommission` y `dbo.FSBCommissionDetail` sincronizadas con la clasificacion actual de tracking y la politica vigente de renewals.

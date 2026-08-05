@@ -146,7 +146,7 @@ ORDER BY
     pp.ProductID;
 GO
 
-
+select * from PromotionProducts
 /*
 -------------------------------------------------------------------------------
 -- 6. RUN TEST
@@ -164,7 +164,7 @@ EXEC dbo.FSBCommission_TrackingReport @SponsorID = 323861;
 GO
 */
 
-TrackingFastStartBonus/TLTravels
+/*TrackingFastStartBonus/TLTravels
 
 
 Username ishiharu
@@ -172,6 +172,8 @@ Username yellowhead
 Username ksj0301
 Username natasatravel
 Username 3goodtime
+*/
+
 
 select u.Email, u.UserName, p.* from promoters p inner join dbo.UserProfile u on p.UserProfileId = u.UserId
 where username in (
@@ -185,30 +187,55 @@ select * from dbo.Product where ProductID in (4,19,22)
 select * from promoters u where u.UserProfileid = 660959
 --	Andrey Rakhmanin
 
+truncate table dbo.FSBCandidates;
 truncate table dbo.FSBTrackings;
 truncate table dbo.FSBCommission;
 truncate table dbo.FSBCommissionDetail;
 
 -- order by SponsorFSB1Start asc
 
+select * from dbo.UserProfile where UserID in (638695, 640199, 639097)
 
-select u.Email, u.UserName, p.promoterid, p.SponsorID, us.Email, us.UserName, s.FSB1StartDate, DATEADD(DAY, 21, s.FSB1StartDate) FSB_END_WINDOWS from promoters p 
+select 
+--u.Email, u.UserName, u.SponsorID as UserProfileSponsorID, s.UserProfileId, c.SponsorMemberID, p.promoterid, 
+o.OrderID, o.OrderDate, u.Email, u.UserName, u.SponsorID, c.UserID, c.SponsorMemberID
+-- p.EnrollDate, p.SponsorID,  
+--us.Email SponsorEmail, us.UserName SponsorUserName, s.FSB1StartDate as SponsorFSB1StartDate, DATEADD(DAY, 21, s.FSB1StartDate) SponsorFSB3EndDate 
+
+from dbo.[Order] o 
+inner join dbo.MWRCustomers c on o.CustomerId = c.CustomerID and o.[Status] = 'Active' and o.ProductID not in (4,19,22)
+inner join dbo.UserProfile u on c.UserID = u.UserId and u.ApplicationName = 'mwrlife.com'
+where c.SponsorMemberID = 638695
+--UserID in (638695, 640199, 639097)
+
+
+
+select u.Email, u.UserName, u.SponsorID as UserProfileSponsorID, s.UserProfileId, c.SponsorMemberID, p.promoterid, o.OrderID, o.OrderDate, p.EnrollDate, p.SponsorID,  us.Email SponsorEmail, us.UserName SponsorUserName, s.FSB1StartDate as SponsorFSB1StartDate, DATEADD(DAY, 21, s.FSB1StartDate) SponsorFSB3EndDate 
+from promoters p 
 inner join promoters s on p.SponsorId = s.PromoterId
-inner join dbo.UserProfile us on s.UserProfileId = us.UserId and us.username = '3goodtime'
-inner join dbo.UserProfile u on p.UserProfileId = u.UserId
+inner join dbo.UserProfile us on s.UserProfileId = us.UserId and us.username = 'AGTravelandMore' -- in ('Johyoyoun7')
+--,'ksj0301','3goodtime','natasatravel','ksj0301','yellowhead','ishiharu') 
+inner join dbo.UserProfile u on p.UserProfileId = u.UserId --and u.ApplicationName = 'mwrlife.com'
+inner join dbo.MWRCustomers c on c.UserID = u.UserId
+inner join dbo.[Order] o on o.CustomerId = c.CustomerID and o.[Status] = 'Active' and o.ProductID not in (4,19,22)
+order by SponsorID asc
 
+select * from dbo.UserProfile us where us.username in ('ohyoyoun7')
 
-
-where SponsorId = 326851 and EnrollDate between '2026-01-03' and '2026-01-24'
-
-select * from dbo.FSBTrackings  where SponsorID = 326851;
+select * from dbo.FSBTrackings where candidateType = 'Customer'
+select * from dbo.FSBTrackings  where SponsorID in (325853,325948,326814,326851,326929, 316183) order by SponsorID asc;
 select o.* from dbo.[Order] o inner join dbo.FSBTrackings t on o.OrderId = t.OrderID where SponsorID = 327259;
 select rph.* from dbo.RecurringPaymentsHistory rph inner join dbo.FSBTrackings t on rph.OrderId = t.OrderID where SponsorID = 327259;
 select * from dbo.FSBCommission where SponsorID = 327259;
 select cd.* from dbo.FSBCommissionDetail cd inner join dbo.FSBTrackings t on cd.FSBTrackingID = t.FSBTrackingID and t.SponsorID = 327259;
 
+select * from dbo.FSBTrackings ft
+left JOIN dbo.FSBCommissionDetail fcd ON ft.FSBTrackingID = fcd.FSBTrackingID  
+left JOIN dbo.FSBCommission fc on fcd.FSBCommissionID = fc.FSBCommissionID
+where ft.SponsorID = 319936
 
-EXEC dbo.FSBCommission_TrackingReport @SponsorID = 327259;
+
+EXEC dbo.FSBCommission_TrackingReport @SponsorID = 316183;
 EXEC dbo.FSBCommission_TrackingReport @SponsorID = 327259, @ShowAllColumns = 1;
 
 EXEC dbo.FSBCommission_Report @SponsorID = 344015;
@@ -217,3 +244,5 @@ EXEC dbo.FSBCommission_TrackingReport @SponsorID = 312870, @ShowAllColumns = 1;
 EXEC dbo.FSBCommission_TrackingReport @SponsorID = 344015, @ShowAllColumns = 1;
 
 select * from userprofile where userid in (637069,637071);
+select top 1 prod.*, o.* from dbo.[order] o inner JOIN dbo.Product prod ON prod.ProductID = o.ProductID
+where [Name] = 'Travel Advantage Pro' and o.IsEliteTravelAdvantagePro = 1

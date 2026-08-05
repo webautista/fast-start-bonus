@@ -2,73 +2,121 @@
 
 ## Proposito
 
-Reporte de UI para mostrar el estado operativo del tracking y de las comisiones FSB en una sola vista amigable para pantalla.
+Reporte operativo y de UI para revisar el estado del tracking FSB y su relacion con comisiones, renewals y ventanas proyectadas, en una sola vista por sponsor.
 
 ## Parametros
 
 - `@SponsorID = NULL`
 - `@ShowAllColumns = NULL`
 
-## Flujo implementado
+## Comportamiento general
 
-1. Resuelve la promocion FSB activa usando `GETDATE()`.
-2. Si recibe `@SponsorID`, refresca antes:
+1. Resuelve la promocion FSB activa.
+2. Si recibe `@SponsorID`, ejecuta antes:
    - `dbo.FSBTrackings_Load`
    - `dbo.FSBCommission_Generate`
-3. Construye filas base desde `dbo.FSBTrackings`:
-   - Parte de todas las filas de tracking de la promocion.
-   - Hace `LEFT JOIN` a `dbo.FSBCommissionDetail` y `dbo.FSBCommission`.
-   - Conserva filas sin comision `FIRST`, pero si existe comision solo toma `HalfType = 'FIRST'`.
-   - Une `dbo.[Order]`, `dbo.Promoters`, `dbo.UserProfile`, `dbo.Product`, `dbo.RecurringPaymentsHistory` y `dbo.RecurringPayments`.
-4. Recalcula renewal valido con la misma regla de 1 a 44 dias.
-5. Une la informacion de `SECOND` sobre la misma fila base de tracking.
-6. Calcula columnas de UI:
-   - Ambassador
-   - UserName
-   - Product
-   - LastPaymentCreateDate
-   - RenewalDate
-   - `HasValidRenewal`
-   - `SecondHalfPaid`
-   - `StatusColor`, `StatusCode`, `StatusText`
-7. Proyecta fechas de ventana cuando la fecha real viene `NULL`, solo para presentacion:
-   - `FSB1EndDate = real o FSB1StartDate + 7 dias`
-   - `FSB1ExtEndDate = real o FSB1StartDate + 14 dias`
-   - `FSB2StartDate = real o FSB1EndDate real o FSB1StartDate + 7 dias`
-   - `FSB2EndDate = real o FSB2StartDate proyectado + 7 dias`
-   - `FSB3StartDate = real o FSB2EndDate real o FSB1StartDate + 14 dias`
-   - `FSB3EndDate = real o FSB3StartDate proyectado + 7 dias`
-8. Limita la presentacion a las primeras 2 filas por grupo visual FSB.
-9. Devuelve salida detallada o compacta segun `@ShowAllColumns`.
+3. Parte desde `dbo.FSBTrackings`.
+4. Une informacion de `FIRST` y luego agrega `SECOND` sobre la misma fila.
+5. Recalcula renewal valido con la regla de 1 a 44 dias.
+6. Calcula columnas de estado para UI.
+7. Limita la salida visual a `FSBDisplayRank <= 2` por grupo.
 
-## Idea central del reporte
+## Base de la fila
 
-- La fila base es la de `FSBTrackings`.
-- Si existe `FIRST`, sus datos se muestran sobre esa fila base.
-- La informacion de `SECOND` no se muestra como fila separada; se agrega como columnas.
-- Esto evita duplicar renglones en la UI.
-- Las fechas proyectadas no cambian `dbo.FSBTrackings`; solo se calculan en la salida del reporte.
+La fila base es una fila de `dbo.FSBTrackings`.
 
-## Reglas y decisiones de diseno
+- Si existe comision `FIRST`, se presenta sobre esa fila.
+- Si existe `SECOND`, no genera una fila nueva; se adjunta como columnas.
+- Si no existe comision, la fila igual puede aparecer en tracking.
 
-- `FSB1_EXT` se muestra como extension de FSB1.
-- La pantalla solo enseña top 2 por grupo visual.
-- `UserName` forma parte de la salida del reporte y se entrega como ultima columna.
-- `ProductName` tiene una regla especial: si `ProductID = 20` y `IsEliteTravelAdvantagePro = 1`, se muestra `Travel Advantage Elite`.
-- En la salida compacta, la columna `EnrollDate` se alimenta desde `OrderDate`.
-- El color resume el estado operativo:
-  - `GREEN`: renewal valido pagado.
-  - `YELLOW`: sin renewal exitoso todavia, pero con proximo cobro futuro.
-  - `RED`: cancelado, vencido o fuera de regla.
+Esto permite mostrar:
 
-## Limitaciones importantes
+- comisionados
+- no comisionados
+- `NO_FSB`
 
-- No es un reporte de auditoria completo.
-- No muestra todas las ordenes extra de `FSB3`; recorta a 2 filas por grupo.
-- Solo trabaja sobre la promocion FSB actualmente activa.
+## Soporte actual de candidatos
 
-## Cuando usarlo
+El reporte ya soporta:
 
-- Pantalla operativa.
-- Seguimiento rapido por sponsor.
-- Debug visual cuando `@ShowAllColumns = 1`.
+- `PROMOTER`
+- `CUSTOMER`
+
+Columnas relevantes:
+
+- `CandidateType`
+- `PromoterID`
+- `CustomerID`
+- `ParticipantUserID`
+- `UserProfileID`
+
+Para `CUSTOMER`, el fallback visible de `Ambassador` usa `CustomerID` y no el identificador sintetico negativo.
+
+## Reglas visuales importantes
+
+- Si `ProductID = 20` y `IsEliteTravelAdvantagePro = 1`, el producto mostrado es `Travel Advantage Elite`.
+- `NO_FSB` se ordena despues de `FSB3`.
+- Solo se muestran 2 filas por grupo visual para evitar duplicados y ruido en UI.
+
+## Ventanas proyectadas
+
+Si faltan fechas reales en tracking, el reporte proyecta ventanas solo para presentacion:
+
+- `FSB1EndDate = FSB1Start + 7 dias`
+- `FSB1ExtEndDate = FSB1Start + 14 dias`
+- `FSB2StartDate = fin real de FSB1 o proyeccion`
+- `FSB2EndDate = FSB2Start proyectado + 7 dias`
+- `FSB3StartDate = fin real de FSB2 o proyeccion`
+- `FSB3EndDate = FSB3Start proyectado + 7 dias`
+
+Estas proyecciones no modifican `dbo.FSBTrackings`.
+
+## Columnas de estado
+
+El reporte calcula:
+
+- `HasValidRenewal`
+- `SecondHalfPaid`
+- `SecondHalfGrantedCreateDate`
+- `StatusColor`
+- `StatusCode`
+- `StatusText`
+
+La regla de renewal sigue usando:
+
+- `FirstRPHID`
+- `SecondRPHID`
+- `RecurringPaymentsHistory.CreateDate`
+- ventana de 1 a 44 dias desde `OrderDate`
+
+## Modos de salida
+
+### `@ShowAllColumns = 1`
+
+Devuelve vista tecnica completa:
+
+- ids internos
+- tipo de candidato
+- ventanas reales/proyectadas
+- RPHs
+- datos de primera y segunda mitad
+- columnas de estado
+
+### `@ShowAllColumns IS NULL or 0`
+
+Devuelve vista compacta para UI:
+
+- sponsor
+- FSB
+- ambassador
+- enroll/order date
+- producto
+- renewal
+- estado
+
+## Limites del reporte
+
+- No es un validador completo.
+- No muestra el universo total de `FSBCandidates`.
+- Resume la vista a 2 filas por grupo visual.
+- Esta orientado a seguimiento operativo, no a auditoria exhaustiva.

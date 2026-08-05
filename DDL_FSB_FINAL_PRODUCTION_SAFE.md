@@ -2,60 +2,104 @@
 
 ## Proposito
 
-DDL final, no destructivo y orientado a produccion para el modulo FSB. Preserva datos historicos y corrige la estructura para alinearla con la logica final de tracking y comisiones.
+DDL final y no destructivo para instalar o actualizar FastStartBonus en una base existente, preservando historia y dejando la estructura alineada con el modelo actual de auditoria, tracking y comisiones.
 
-## Que implementa
+## Objetos principales
 
 1. `dbo.Promotions`
-   - Crea la tabla si no existe.
+   - Tabla maestra de promociones.
 
 2. `dbo.PromotionProducts`
-   - Crea la tabla si no existe.
-   - Si la tabla ya existe pero no tiene `IsExcluded`, agrega la columna.
-   - Agrega FK hacia `dbo.Promotions`.
+   - Tabla de configuracion de productos por promocion.
+   - Trabaja en modo exclusion por `IsExcluded = 1`.
 
-3. `dbo.FSBTrackings`
-   - Crea la tabla historica de tracking si no existe.
-   - Permite `FSB1`, `FSB1_EXT`, `FSB2`, `FSB3`.
-   - Agrega FK hacia `dbo.Promotions`.
+3. `dbo.FSBCandidates`
+   - Nuevo universo auditable completo a nivel orden.
+   - Guarda candidatos `PROMOTER` y `CUSTOMER`.
+   - Conserva estado de elegibilidad estatica y razon de descarte.
 
-4. `dbo.FSBCommission`
-   - Crea la tabla de cabeceras de comision si no existe.
-   - Restringe `FSBType` a `FSB1`, `FSB2`, `FSB3`.
-   - Si existia un `CHECK` viejo que permitia `FSB1_EXT`, lo reemplaza por la version final.
-   - Agrega FK hacia `dbo.Promotions`.
-   - Agrega FK opcional hacia `dbo.DailyRealTimeCommission` si esa tabla existe con columna `ID`.
+4. `dbo.FSBTrackings`
+   - Tracking historico clasificado.
+   - Soporta `FSB1`, `FSB1_EXT`, `FSB2`, `FSB3` y `NO_FSB`.
+   - Incluye `CustomerID`, `ParticipantUserID` y `CandidateType`.
 
-5. `dbo.FSBCommissionDetail`
-   - Crea la tabla de detalle si no existe.
-   - Agrega FK hacia `dbo.FSBCommission`.
-   - Agrega FK hacia `dbo.FSBTrackings`.
+5. `dbo.FSBCommission`
+   - Cabecera de comisiones.
+   - Solo permite `FSB1`, `FSB2`, `FSB3`.
 
-6. Indices internos FSB
-   - Amplia el set de indices de `FSBTrackings`, `FSBCommission`, `FSBCommissionDetail` y `PromotionProducts`.
-   - Agrega indices adicionales como `IX_FSBTrackings_Order`, `IX_FSBCommissionDetail_Tracking` e `IX_PromotionProducts_Excluded`.
+6. `dbo.FSBCommissionDetail`
+   - Detalle por tracking usado en cada comision.
 
-7. Inserciones opcionales de configuracion
-   - Deja comentado un bloque para crear una promo `FSB_TEST`.
-   - Deja comentada la carga de productos excluidos `4` y `22`.
+## Cambios funcionales clave
 
-## Diferencias clave contra `DDL.sql`
+- Agrega `dbo.FSBCandidates` como tabla de auditoria del universo completo.
+- Amplia `dbo.FSBTrackings` para soportar:
+  - `CustomerID`
+  - `ParticipantUserID`
+  - `CandidateType`
+  - `NO_FSB`
+- Mantiene `FSB1_EXT` solo en tracking.
+- Mantiene `FSBCommission` restringida a tipos comisionables.
 
-- No usa `DROP TABLE`.
-- Aplica o corrige restricciones sobre estructuras ya existentes.
-- `FSBCommission` ya no permite `FSB1_EXT`.
-- Agrega llaves foraneas reales.
-- Define un set de indices mas completo.
-- Incluye una pequena logica de migracion de estructura.
+## Logica de migracion incluida
+
+- Si `dbo.PromotionProducts` no tiene `IsExcluded`, la agrega.
+- Si `dbo.FSBTrackings` no tiene `CustomerID`, `ParticipantUserID` o `CandidateType`, los agrega.
+- Reemplaza el `CHECK` de `FSBTrackings.FSBType` para incluir `NO_FSB`.
+- Si hay filas viejas de `FSBTrackings` sin datos nuevos, intenta backfill de:
+  - `CustomerID`
+  - `ParticipantUserID`
+  - `CandidateType = 'PROMOTER'`
+
+## Restricciones y diseño
+
+- `dbo.FSBCandidates.CandidateType` permite:
+  - `PROMOTER`
+  - `CUSTOMER`
+- `dbo.FSBTrackings.CandidateType` permite:
+  - `PROMOTER`
+  - `CUSTOMER`
+- `dbo.FSBTrackings.FSBType` permite:
+  - `FSB1`
+  - `FSB1_EXT`
+  - `FSB2`
+  - `FSB3`
+  - `NO_FSB`
+- `dbo.FSBCommission.FSBType` permite:
+  - `FSB1`
+  - `FSB2`
+  - `FSB3`
+
+## Indices relevantes
+
+- `FSBCandidates`
+  - `IX_FSBCandidates_Sponsor_Cycle_Type`
+  - `IX_FSBCandidates_Order`
+- `FSBTrackings`
+  - indices para sponsor/ciclo/orden
+  - indices para busquedas por `CandidateType`
+  - soporte a joins con `FSBCommissionDetail`
+- `FSBCommission` y `FSBCommissionDetail`
+  - indices para headers/details por promocion, sponsor y tracking
 
 ## Reglas de negocio reflejadas
 
-- `FSB1_EXT` existe solo como clasificacion de tracking.
-- Si la extension gana FSB1, la cabecera oficial de comision sigue siendo `FSB1`.
-- `PromotionProducts` funciona en modo exclusion, no como lista blanca.
+- El universo completo se audita antes de clasificar.
+- `PromotionProducts` excluye productos; no define whitelist.
+- `FSB1_EXT` puede existir en tracking, pero no como cabecera de comision.
+- `NO_FSB` existe para auditoria y reporteria, no para pago.
 
 ## Cuando usarlo
 
-- Despliegues de produccion.
-- Actualizacion segura de ambientes existentes.
-- Base final para ambientes que ya contienen historia.
+- Instalacion desde cero.
+- Actualizacion segura de un ambiente existente.
+- Despliegue productivo donde no se puede perder historia.
+
+## Orden relacionado
+
+Despues de este DDL, los scripts que deben instalarse son:
+
+1. `FSBTrackings_Load.sql`
+2. `FSBCommission_Generate.sql`
+3. `FSBCommission_Report.sql`
+4. `FSBCommission_TrackingReport.sql`

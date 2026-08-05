@@ -2,61 +2,67 @@
 
 ## Proposito
 
-Reporte de auditoria de comisiones FSB. Muestra las filas reales usadas en `dbo.FSBCommission` y `dbo.FSBCommissionDetail`, separando `FIRST` y `SECOND`.
+Reporte de auditoria de comisiones ya materializadas. Muestra exactamente que filas de `dbo.FSBTrackings` fueron usadas en `dbo.FSBCommission` y `dbo.FSBCommissionDetail`, tanto para `FIRST` como para `SECOND`.
 
 ## Parametros
 
 - `@SponsorID = NULL`
 
-## Flujo implementado
+## Comportamiento
 
-1. Resuelve la promocion FSB activa con `GETDATE()`.
-2. Si recibe `@SponsorID`, refresca antes:
+1. Resuelve la promocion FSB activa usando `GETDATE()`.
+2. Si recibe `@SponsorID`, primero ejecuta:
    - `dbo.FSBTrackings_Load`
    - `dbo.FSBCommission_Generate`
-3. Construye `ReportBase` desde:
+3. Construye el reporte desde:
    - `dbo.FSBCommission`
    - `dbo.FSBCommissionDetail`
    - `dbo.FSBTrackings`
    - `dbo.[Order]`
    - `dbo.RecurringPaymentsHistory`
-4. Recalcula renewal valido:
-   - Usa `FirstRPHID` o `SecondRPHID`.
-   - Debe estar entre 1 y 44 dias desde `OrderDate`.
-5. Devuelve una fila por detalle real de comision, con informacion de:
-   - tipo de comision
-   - half
-   - tracking usado
-   - fechas FSB
-   - pagos recurrentes
-   - renewal valido
-   - estado de auditoria
+4. Recalcula renewal valido con la misma regla de 1 a 44 dias.
+5. Devuelve una fila por detalle real de comision.
 
-## Que audita exactamente
-
-- Que filas entraron en `FIRST`.
-- Que filas entraron en `SECOND`.
-- Si la fila de `SECOND` tiene un renewal valido segun la regla vigente.
-- Si un tracking fue usado para primera mitad o segunda mitad.
-
-## Columnas de lectura clave
+## Informacion que expone
 
 - `CommissionFSBType`
 - `HalfType`
 - `TrackingFSBType`
-- `ValidRenewalRPHID`
-- `ValidRenewalCreateDate`
-- `RenewalDaysFromOrderDate`
-- `HasValidRenewal`
-- `SecondHalfGrantedCreateDate`
+- `PromoterID`
+- `CustomerID`
+- `ParticipantUserID`
+- `CandidateType`
+- `OrderID`
+- fechas de ventanas FSB
+- `FirstRPHID`
+- `SecondRPHID`
+- renewal valido y su fuente
 - `AuditStatus`
 
-## Diferencia frente a `FSBCommission_TrackingReport.sql`
+## AuditStatus
 
-- Este si es un reporte de auditoria de comisiones.
+Los estados principales son:
+
+- `USED_FOR_FIRST_HALF`
+- `USED_FOR_SECOND_HALF`
+- `SECOND_HALF_DETAIL_WITHOUT_VALID_RENEWAL`
+
+## Regla de renewal usada
+
+Se considera renewal valido si:
+
+- `FirstRPHID` o `SecondRPHID` existe
+- el `CreateDate` esta entre 1 y 44 dias desde `OrderDate`
+
+## Diferencia frente a TrackingReport
+
+- Este reporte audita solo lo que ya llego a comision.
+- No es una vista UI resumida.
 - No colapsa `FIRST` y `SECOND` en una sola fila.
-- No intenta ser una vista de UI con colores o resumen visual.
+- No intenta mostrar candidatos `NO_FSB`, porque esos no generan comision.
 
-## Limite funcional
+## Cuando usarlo
 
-Aunque es el reporte correcto para auditar comisiones, sigue auditando solo lo que ya llego a `dbo.FSBCommission` y `dbo.FSBCommissionDetail`. No reemplaza la validacion completa de tracking sobre `dbo.FSBTrackings`.
+- auditoria tecnica de comision
+- revisiones de primera y segunda mitad
+- analisis de renewals aplicados a pagos
