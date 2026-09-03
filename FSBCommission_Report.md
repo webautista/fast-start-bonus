@@ -11,9 +11,7 @@ Reporte de auditoria de comisiones ya materializadas. Muestra exactamente que fi
 ## Comportamiento
 
 1. Resuelve la promocion FSB activa usando `GETDATE()`.
-2. Si recibe `@SponsorID`, primero ejecuta:
-   - `dbo.FSBTrackings_Load`
-   - `dbo.FSBCommission_Generate`
+2. No ejecuta procesos de carga ni generacion; es un reporte de solo lectura.
 3. Construye el reporte desde:
    - `dbo.FSBCommission`
    - `dbo.FSBCommissionDetail`

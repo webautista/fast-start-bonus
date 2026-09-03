@@ -32,7 +32,7 @@ DDL final y no destructivo para instalar o actualizar FastStartBonus en una base
 
 ## Cambios funcionales clave
 
-- Agrega `dbo.FSBCandidates` como tabla de auditoria del universo completo.
+- Agrega `dbo.FSBCandidates` como tabla de auditoria del universo completo. La carga incremental conserva las filas y usa `IsCurrent`, `FirstSeenAt`, `LastSeenAt` e `InactivatedAt` para controlar su vigencia.
 - Amplia `dbo.FSBTrackings` para soportar:
   - `CustomerID`
   - `ParticipantUserID`
@@ -81,6 +81,8 @@ DDL final y no destructivo para instalar o actualizar FastStartBonus en una base
   - soporte a joins con `FSBCommissionDetail`
 - `FSBCommission` y `FSBCommissionDetail`
   - indices para headers/details por promocion, sponsor y tracking
+  - `UQ_FSBCommissionDetail` cubre la unicidad `(FSBCommissionID, FSBTrackingID)`
+  - no se crea el indice redundante con las mismas columnas; si existe, el DDL seguro lo elimina
 
 ## Reglas de negocio reflejadas
 
@@ -101,5 +103,6 @@ Despues de este DDL, los scripts que deben instalarse son:
 
 1. `FSBTrackings_Load.sql`
 2. `FSBCommission_Generate.sql`
-3. `FSBCommission_Report.sql`
-4. `FSBCommission_TrackingReport.sql`
+3. `FSBCommission_Apply.sql`
+4. `FSBCommission_Report.sql`
+5. `FSBCommission_TrackingReport.sql`

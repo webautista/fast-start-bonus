@@ -16,23 +16,42 @@ BEGIN
 
     DECLARE @LockResult INT;
     DECLARE @LockResource NVARCHAR(255);
+    DECLARE @SponsorLockResult INT;
+    DECLARE @SponsorLockResource NVARCHAR(255);
+    DECLARE @LockMode VARCHAR(10);
+    DECLARE @OwnTransaction BIT;
 
-    SET @LockResource = 'FSBCommission_Generate_' + CAST(@PromotionID AS NVARCHAR(50));
+    SET @OwnTransaction = CASE WHEN @@TRANCOUNT = 0 THEN 1 ELSE 0 END;
+    SET @LockResource = 'FSB_Flow_' + CAST(@PromotionID AS NVARCHAR(50));
+    SET @LockMode = CASE WHEN @SponsorID IS NULL THEN 'Exclusive' ELSE 'Shared' END;
+    SET @SponsorLockResource = 'FSB_Flow_' + CAST(@PromotionID AS NVARCHAR(50))
+                             + '_Sponsor_' + CAST(@SponsorID AS NVARCHAR(50));
 
     BEGIN TRY
-        BEGIN TRANSACTION;
+        IF @OwnTransaction = 1
+            BEGIN TRANSACTION;
 
         EXEC @LockResult = sys.sp_getapplock
             @Resource = @LockResource,
-            @LockMode = 'Exclusive',
+            @LockMode = @LockMode,
             @LockOwner = 'Transaction',
             @LockTimeout = 30000;
 
         IF @LockResult < 0
         BEGIN
-            RAISERROR('Could not acquire FSBCommission_Generate lock.', 16, 1);
-            ROLLBACK TRANSACTION;
-            RETURN;
+            THROW 50000, 'Could not acquire FSB_Flow lock for FSBCommission_Generate.', 1;
+        END;
+
+        IF @SponsorID IS NOT NULL
+        BEGIN
+            EXEC @SponsorLockResult = sys.sp_getapplock
+                @Resource = @SponsorLockResource,
+                @LockMode = 'Exclusive',
+                @LockOwner = 'Transaction',
+                @LockTimeout = 30000;
+
+            IF @SponsorLockResult < 0
+                THROW 50000, 'Could not acquire FSB_Flow sponsor lock for FSBCommission_Generate.', 1;
         END;
 
         -----------------------------------------------------------------------
@@ -72,7 +91,7 @@ BEGIN
                 ft.SponsorFSB1Start,
                 ft.FSBType,
                 COUNT(DISTINCT ft.PromoterID) AS PromoterCount
-            FROM dbo.FSBTrackings ft WITH (UPDLOCK, HOLDLOCK)
+            FROM dbo.FSBTrackings ft
             WHERE ft.PromotionID = @PromotionID
               AND (@SponsorID IS NULL OR ft.SponsorID = @SponsorID)
               AND ft.FSBType IN ('FSB1', 'FSB1_EXT', 'FSB2', 'FSB3')
@@ -206,7 +225,7 @@ BEGIN
         -----------------------------------------------------------------------
         -- 3. INSERT FIRST HALF DETAILS
         --
-        -- FIRST guarda todos los promoters válidos del grupo.
+        -- FIRST guarda todos los promoters validos del grupo.
         -----------------------------------------------------------------------
 
         INSERT INTO dbo.FSBCommissionDetail
@@ -261,8 +280,8 @@ BEGIN
         -- 4. VALID RENEWAL STATUS
         --
         -- Regla actual:
-        -- Renewal válido si FirstRPHID o SecondRPHID tiene CreateDate
-        -- entre 1 y 44 días desde OrderDate.
+        -- Renewal valido si FirstRPHID o SecondRPHID tiene CreateDate
+        -- entre 1 y 44 dias desde OrderDate.
         --
         -- IMPORTANTE:
         -- Se usa RecurringPaymentsHistory.CreateDate.
@@ -341,7 +360,8 @@ BEGIN
            AND ISNULL(rphSecond.Reverted, 0) = 0
 
         WHERE ft.PromotionID = @PromotionID
-          AND (@SponsorID IS NULL OR ft.SponsorID = @SponsorID);
+          AND (@SponsorID IS NULL OR ft.SponsorID = @SponsorID)
+          AND ft.FSBType IN ('FSB1', 'FSB1_EXT', 'FSB2', 'FSB3');
 
         CREATE UNIQUE CLUSTERED INDEX CX_RenewalStatus
         ON #RenewalStatus (FSBTrackingID);
@@ -412,7 +432,7 @@ BEGIN
         -----------------------------------------------------------------------
 
         -- FSB1 SECOND:
-        -- mínimo 2 renewals válidos del grupo FSB1.
+        -- minimo 2 renewals validos del grupo FSB1.
         INSERT INTO #SecondEligible
         (
             PromotionID,
@@ -436,7 +456,7 @@ BEGIN
           AND rc.RenewedCount >= 2;
 
         -- FSB2 SECOND:
-        -- mínimo 2 renewals FSB1 + mínimo 2 renewals FSB2.
+        -- minimo 2 renewals FSB1 + minimo 2 renewals FSB2.
         INSERT INTO #SecondEligible
         (
             PromotionID,
@@ -466,7 +486,7 @@ BEGIN
           AND f2.RenewedCount >= 2;
 
         -- FSB3 SECOND:
-        -- mínimo 2 renewals FSB1 + mínimo 2 renewals FSB2 + mínimo 2 renewals FSB3.
+        -- minimo 2 renewals FSB1 + minimo 2 renewals FSB2 + minimo 2 renewals FSB3.
         INSERT INTO #SecondEligible
         (
             PromotionID,
@@ -545,7 +565,7 @@ BEGIN
         -----------------------------------------------------------------------
         -- 8. INSERT SECOND HALF DETAILS
         --
-        -- SECOND guarda solo los promoters con renewal válido.
+        -- SECOND guarda solo los promoters con renewal valido.
         --
         -- FSB1 SECOND:
         --     detalles renovados de FSB1.
@@ -602,10 +622,11 @@ BEGIN
                 AND existing.FSBTrackingID = d.FSBTrackingID
           );
 
-        COMMIT TRANSACTION;
+        IF @OwnTransaction = 1
+            COMMIT TRANSACTION;
     END TRY
     BEGIN CATCH
-        IF @@TRANCOUNT > 0
+        IF @OwnTransaction = 1 AND XACT_STATE() <> 0
             ROLLBACK TRANSACTION;
 
         DECLARE @ErrorMessage NVARCHAR(4000);
@@ -617,8 +638,10 @@ BEGIN
             @ErrorSeverity = ERROR_SEVERITY(),
             @ErrorState = ERROR_STATE();
 
-        RAISERROR(@ErrorMessage, @ErrorSeverity, @ErrorState);
-        RETURN;
+        IF @OwnTransaction = 1
+            RAISERROR(@ErrorMessage, @ErrorSeverity, @ErrorState);
+        ELSE
+            THROW;
     END CATCH
 END;
 GO

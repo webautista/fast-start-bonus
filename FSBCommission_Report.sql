@@ -38,25 +38,8 @@ BEGIN
         END;
 
         -----------------------------------------------------------------------
-        -- AUTO REFRESH FOR SPECIFIC SPONSOR
-        --
-        -- Si se recibe @SponsorID, refrescamos primero tracking y commissions
-        -- de ese sponsor usando la promoción efectiva.
-        -----------------------------------------------------------------------
-
-        IF @SponsorID IS NOT NULL
-        BEGIN
-            EXEC dbo.FSBTrackings_Load
-                @PromotionID = @EffectivePromotionID,
-                @SponsorID = @SponsorID;
-
-            EXEC dbo.FSBCommission_Generate
-                @PromotionID = @EffectivePromotionID,
-                @SponsorID = @SponsorID;
-        END;
-
-        -----------------------------------------------------------------------
         -- COMMISSION REPORT
+        -- Read-only: tracking and commission generation run outside this report.
         -----------------------------------------------------------------------
 
         ;WITH ReportBase AS

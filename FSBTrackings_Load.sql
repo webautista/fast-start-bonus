@@ -16,38 +16,50 @@ BEGIN
 
     DECLARE @LockResult INT;
     DECLARE @LockResource NVARCHAR(255);
+    DECLARE @SponsorLockResult INT;
+    DECLARE @SponsorLockResource NVARCHAR(255);
+    DECLARE @LockMode VARCHAR(10);
 
     DECLARE @NullDate DATETIME;
+    DECLARE @LoadAt DATETIME;
 
     SET @NullDate = CONVERT(DATETIME, '19000101', 112);
-    SET @LockResource = 'FSBTrackings_Load_' + CAST(@PromotionID AS NVARCHAR(50));
+    SET @LoadAt = GETDATE();
+    SET @LockResource = 'FSB_Flow_' + CAST(@PromotionID AS NVARCHAR(50));
+    SET @LockMode = CASE WHEN @SponsorID IS NULL THEN 'Exclusive' ELSE 'Shared' END;
+    SET @SponsorLockResource = 'FSB_Flow_' + CAST(@PromotionID AS NVARCHAR(50))
+                             + '_Sponsor_' + CAST(@SponsorID AS NVARCHAR(50));
 
     BEGIN TRY
-        BEGIN TRANSACTION;
-
         EXEC @LockResult = sys.sp_getapplock
             @Resource = @LockResource,
-            @LockMode = 'Exclusive',
-            @LockOwner = 'Transaction',
+            @LockMode = @LockMode,
+            @LockOwner = 'Session',
             @LockTimeout = 30000;
 
         IF @LockResult < 0
+            THROW 50000, 'Could not acquire FSB_Flow promotion lock for FSBTrackings_Load.', 1;
+
+        IF @SponsorID IS NOT NULL
         BEGIN
-            RAISERROR('Could not acquire FSBTrackings_Load lock.', 16, 1);
-            ROLLBACK TRANSACTION;
-            RETURN;
+            EXEC @SponsorLockResult = sys.sp_getapplock
+                @Resource = @SponsorLockResource,
+                @LockMode = 'Exclusive',
+                @LockOwner = 'Session',
+                @LockTimeout = 30000;
+
+            IF @SponsorLockResult < 0
+                THROW 50000, 'Could not acquire FSB_Flow sponsor lock for FSBTrackings_Load.', 1;
         END;
 
         IF NOT EXISTS
         (
             SELECT 1
-            FROM dbo.Promotions WITH (UPDLOCK, HOLDLOCK)
+            FROM dbo.Promotions
             WHERE PromotionID = @PromotionID
         )
         BEGIN
-            RAISERROR('Invalid PromotionID.', 16, 1);
-            ROLLBACK TRANSACTION;
-            RETURN;
+            THROW 50000, 'Invalid PromotionID.', 1;
         END;
 
         -----------------------------------------------------------------------
@@ -390,69 +402,7 @@ BEGIN
         ON #Universe (OrderID);
 
         -----------------------------------------------------------------------
-        -- 3. REFRESH AUDIT TABLE
-        -----------------------------------------------------------------------
-
-        DELETE fc
-        FROM dbo.FSBCandidates fc
-        INNER JOIN #ScopeSponsors scope
-            ON scope.PromotionID = fc.PromotionID
-           AND scope.SponsorID = fc.SponsorID
-           AND scope.SponsorFSB1Start = fc.SponsorFSB1Start
-        WHERE fc.PromotionID = @PromotionID;
-
-        INSERT INTO dbo.FSBCandidates
-        (
-            PromotionID,
-            SponsorID,
-            SponsorUserID,
-            SponsorFSB1Start,
-            CandidateKey,
-            CandidateType,
-            PromoterID,
-            CustomerID,
-            ParticipantUserID,
-            OrderID,
-            OrderDate,
-            ProductID,
-            OrderStatus,
-            IsExcludedProduct,
-            IsStaticEligible,
-            StaticEligibilityReason,
-            IsEliteTravelAdvantagePro,
-            IsPromoCouponApplied,
-            IsPermanentPromoCouponApplied,
-            FreeCommission,
-            IsDagCustomer,
-            IsCreatedWithPromoPrice
-        )
-        SELECT
-            PromotionID,
-            SponsorID,
-            SponsorUserID,
-            SponsorFSB1Start,
-            CandidateKey,
-            CandidateType,
-            PromoterID,
-            CustomerID,
-            ParticipantUserID,
-            OrderID,
-            OrderDate,
-            ProductID,
-            OrderStatus,
-            IsExcludedProduct,
-            IsStaticEligible,
-            StaticEligibilityReason,
-            IsEliteTravelAdvantagePro,
-            IsPromoCouponApplied,
-            IsPermanentPromoCouponApplied,
-            FreeCommission,
-            IsDagCustomer,
-            IsCreatedWithPromoPrice
-        FROM #Universe;
-
-        -----------------------------------------------------------------------
-        -- 4. BASE ORDERS FOR CLASSIFICATION
+        -- 3. BASE ORDERS FOR CLASSIFICATION
         -- One static-eligible order per associated entity in the cycle:
         --   - PROMOTER: first eligible order per sponsored promoter
         --   - CUSTOMER: first eligible order per sponsored customer
@@ -499,13 +449,13 @@ BEGIN
                         c.OrderDate,
                         c.OrderID
                 ) AS rn
-            FROM dbo.FSBCandidates c
+            FROM #Universe c
             INNER JOIN #ScopeSponsors scope
                 ON scope.PromotionID = c.PromotionID
                AND scope.SponsorID = c.SponsorID
                AND scope.SponsorFSB1Start = c.SponsorFSB1Start
             WHERE c.PromotionID = @PromotionID
-              AND c.IsStaticEligible = 1
+               AND c.IsStaticEligible = 1
         )
         INSERT INTO #BaseOrders
         (
@@ -1208,7 +1158,118 @@ BEGIN
         ON #OrderPayments (OrderID);
 
         -----------------------------------------------------------------------
-        -- 12. REFRESH TRACKINGS IN CURRENT SCOPE
+        -- 12. PERSIST CLASSIFICATION AND COMMISSIONS ATOMICALLY
+        -----------------------------------------------------------------------
+
+        BEGIN TRANSACTION;
+
+        UPDATE fc
+        SET fc.IsCurrent = 0,
+            fc.InactivatedAt = CASE WHEN fc.IsCurrent = 1 THEN @LoadAt ELSE fc.InactivatedAt END
+        FROM dbo.FSBCandidates fc
+        INNER JOIN #ScopeSponsors scope
+            ON scope.PromotionID = fc.PromotionID
+           AND scope.SponsorID = fc.SponsorID
+           AND scope.SponsorFSB1Start = fc.SponsorFSB1Start
+        WHERE fc.PromotionID = @PromotionID;
+
+        UPDATE fc
+        SET fc.SponsorUserID = u.SponsorUserID,
+            fc.CandidateKey = u.CandidateKey,
+            fc.PromoterID = u.PromoterID,
+            fc.CustomerID = u.CustomerID,
+            fc.ParticipantUserID = u.ParticipantUserID,
+            fc.OrderDate = u.OrderDate,
+            fc.ProductID = u.ProductID,
+            fc.OrderStatus = u.OrderStatus,
+            fc.IsExcludedProduct = u.IsExcludedProduct,
+            fc.IsStaticEligible = u.IsStaticEligible,
+            fc.StaticEligibilityReason = u.StaticEligibilityReason,
+            fc.IsEliteTravelAdvantagePro = u.IsEliteTravelAdvantagePro,
+            fc.IsPromoCouponApplied = u.IsPromoCouponApplied,
+            fc.IsPermanentPromoCouponApplied = u.IsPermanentPromoCouponApplied,
+            fc.FreeCommission = u.FreeCommission,
+            fc.IsDagCustomer = u.IsDagCustomer,
+            fc.IsCreatedWithPromoPrice = u.IsCreatedWithPromoPrice,
+            fc.LastSeenAt = @LoadAt,
+            fc.InactivatedAt = NULL,
+            fc.IsCurrent = 1
+        FROM dbo.FSBCandidates fc
+        INNER JOIN #Universe u
+            ON u.PromotionID = fc.PromotionID
+           AND u.SponsorID = fc.SponsorID
+           AND u.SponsorFSB1Start = fc.SponsorFSB1Start
+           AND u.CandidateType = fc.CandidateType
+           AND u.OrderID = fc.OrderID;
+
+        INSERT INTO dbo.FSBCandidates
+        (
+            PromotionID,
+            SponsorID,
+            SponsorUserID,
+            SponsorFSB1Start,
+            CandidateKey,
+            CandidateType,
+            PromoterID,
+            CustomerID,
+            ParticipantUserID,
+            OrderID,
+            OrderDate,
+            ProductID,
+            OrderStatus,
+            IsExcludedProduct,
+            IsStaticEligible,
+            StaticEligibilityReason,
+            IsEliteTravelAdvantagePro,
+            IsPromoCouponApplied,
+            IsPermanentPromoCouponApplied,
+            FreeCommission,
+            IsDagCustomer,
+            IsCreatedWithPromoPrice,
+            FirstSeenAt,
+            LastSeenAt,
+            IsCurrent
+        )
+        SELECT
+            PromotionID,
+            SponsorID,
+            SponsorUserID,
+            SponsorFSB1Start,
+            CandidateKey,
+            CandidateType,
+            PromoterID,
+            CustomerID,
+            ParticipantUserID,
+            OrderID,
+            OrderDate,
+            ProductID,
+            OrderStatus,
+            IsExcludedProduct,
+            IsStaticEligible,
+            StaticEligibilityReason,
+            IsEliteTravelAdvantagePro,
+            IsPromoCouponApplied,
+            IsPermanentPromoCouponApplied,
+            FreeCommission,
+            IsDagCustomer,
+            IsCreatedWithPromoPrice,
+            @LoadAt,
+            @LoadAt,
+            1
+        FROM #Universe u
+        WHERE NOT EXISTS
+        (
+            SELECT 1
+            FROM dbo.FSBCandidates fc WITH (UPDLOCK, HOLDLOCK)
+            WHERE fc.PromotionID = u.PromotionID
+              AND fc.SponsorID = u.SponsorID
+              AND fc.SponsorFSB1Start = u.SponsorFSB1Start
+              AND fc.CandidateType = u.CandidateType
+              AND fc.OrderID = u.OrderID
+        );
+
+        -----------------------------------------------------------------------
+        -- 13. REFRESH TRACKINGS IN CURRENT SCOPE
         -----------------------------------------------------------------------
 
         DELETE ft
@@ -1330,22 +1391,41 @@ BEGIN
              OR ISNULL(ft.SecondRPHID, -1) <> ISNULL(op.SecondRPHID, -1)
           );
 
+        -----------------------------------------------------------------------
+        -- 14. GENERATE COMMISSION HEADERS/DETAILS IN THE SAME TRANSACTION
+        --
+        -- Generate participates in this transaction and does not commit it.
+        -----------------------------------------------------------------------
+
+        EXEC dbo.FSBCommission_Generate
+            @PromotionID = @PromotionID,
+            @SponsorID = @SponsorID;
+
         COMMIT TRANSACTION;
+
+        IF @SponsorID IS NOT NULL
+            EXEC sys.sp_releaseapplock
+                @Resource = @SponsorLockResource,
+                @LockOwner = 'Session';
+
+        EXEC sys.sp_releaseapplock
+            @Resource = @LockResource,
+            @LockOwner = 'Session';
     END TRY
     BEGIN CATCH
         IF XACT_STATE() <> 0
             ROLLBACK TRANSACTION;
 
-        DECLARE @ErrorMessage NVARCHAR(4000);
-        DECLARE @ErrorSeverity INT;
-        DECLARE @ErrorState INT;
+        IF @SponsorID IS NOT NULL
+            EXEC sys.sp_releaseapplock
+                @Resource = @SponsorLockResource,
+                @LockOwner = 'Session';
 
-        SELECT
-            @ErrorMessage = ERROR_MESSAGE(),
-            @ErrorSeverity = ERROR_SEVERITY(),
-            @ErrorState = ERROR_STATE();
+        EXEC sys.sp_releaseapplock
+            @Resource = @LockResource,
+            @LockOwner = 'Session';
 
-        RAISERROR(@ErrorMessage, @ErrorSeverity, @ErrorState);
+        THROW;
     END CATCH
 END;
 GO

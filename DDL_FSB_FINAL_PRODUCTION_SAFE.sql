@@ -98,6 +98,10 @@ BEGIN
     (
         FSBCandidateID BIGINT IDENTITY(1,1) NOT NULL,
         CreatedAt DATETIME NOT NULL CONSTRAINT DF_FSBCandidates_CreatedAt DEFAULT(GETDATE()),
+        FirstSeenAt DATETIME NOT NULL CONSTRAINT DF_FSBCandidates_FirstSeenAt DEFAULT(GETDATE()),
+        LastSeenAt DATETIME NOT NULL CONSTRAINT DF_FSBCandidates_LastSeenAt DEFAULT(GETDATE()),
+        InactivatedAt DATETIME NULL,
+        IsCurrent BIT NOT NULL CONSTRAINT DF_FSBCandidates_IsCurrent DEFAULT(1),
 
         PromotionID BIGINT NOT NULL,
         SponsorID BIGINT NOT NULL,
@@ -142,6 +146,29 @@ BEGIN
             OrderID
         )
     );
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBCandidates', 'U') IS NOT NULL
+BEGIN
+    IF COL_LENGTH('dbo.FSBCandidates', 'FirstSeenAt') IS NULL
+    BEGIN
+        EXEC(N'ALTER TABLE dbo.FSBCandidates ADD FirstSeenAt DATETIME NULL');
+        EXEC(N'UPDATE dbo.FSBCandidates SET FirstSeenAt = CreatedAt WHERE FirstSeenAt IS NULL');
+        EXEC(N'ALTER TABLE dbo.FSBCandidates ALTER COLUMN FirstSeenAt DATETIME NOT NULL');
+        EXEC(N'ALTER TABLE dbo.FSBCandidates ADD CONSTRAINT DF_FSBCandidates_FirstSeenAt DEFAULT(GETDATE()) FOR FirstSeenAt');
+    END;
+    IF COL_LENGTH('dbo.FSBCandidates', 'LastSeenAt') IS NULL
+    BEGIN
+        EXEC(N'ALTER TABLE dbo.FSBCandidates ADD LastSeenAt DATETIME NULL');
+        EXEC(N'UPDATE dbo.FSBCandidates SET LastSeenAt = CreatedAt WHERE LastSeenAt IS NULL');
+        EXEC(N'ALTER TABLE dbo.FSBCandidates ALTER COLUMN LastSeenAt DATETIME NOT NULL');
+        EXEC(N'ALTER TABLE dbo.FSBCandidates ADD CONSTRAINT DF_FSBCandidates_LastSeenAt DEFAULT(GETDATE()) FOR LastSeenAt');
+    END;
+    IF COL_LENGTH('dbo.FSBCandidates', 'InactivatedAt') IS NULL
+        ALTER TABLE dbo.FSBCandidates ADD InactivatedAt DATETIME NULL;
+    IF COL_LENGTH('dbo.FSBCandidates', 'IsCurrent') IS NULL
+        ALTER TABLE dbo.FSBCandidates ADD IsCurrent BIT NOT NULL CONSTRAINT DF_FSBCandidates_IsCurrent DEFAULT(1);
 END;
 GO
 
@@ -536,6 +563,7 @@ BEGIN
         SponsorID,
         SponsorFSB1Start,
         CandidateType,
+        IsCurrent,
         IsStaticEligible,
         CandidateKey
     )
@@ -688,7 +716,7 @@ END;
 GO
 
 IF OBJECT_ID('dbo.FSBCommissionDetail', 'U') IS NOT NULL
-   AND NOT EXISTS
+   AND EXISTS
    (
        SELECT 1
        FROM sys.indexes
@@ -696,12 +724,8 @@ IF OBJECT_ID('dbo.FSBCommissionDetail', 'U') IS NOT NULL
          AND object_id = OBJECT_ID('dbo.FSBCommissionDetail')
    )
 BEGIN
-    CREATE INDEX IX_FSBCommissionDetail_Commission_Tracking
-    ON dbo.FSBCommissionDetail
-    (
-        FSBCommissionID,
-        FSBTrackingID
-    );
+    DROP INDEX IX_FSBCommissionDetail_Commission_Tracking
+        ON dbo.FSBCommissionDetail;
 END;
 GO
 

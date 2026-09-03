@@ -1162,7 +1162,8 @@ INNER JOIN #V_ScopeSponsors scope
     ON scope.PromotionID = c.PromotionID
    AND scope.SponsorID = c.SponsorID
    AND scope.SponsorFSB1Start = c.SponsorFSB1Start
-WHERE c.PromotionID = @PromotionID;
+WHERE c.PromotionID = @PromotionID
+  AND c.IsCurrent = 1;
 
 CREATE CLUSTERED INDEX CX_V_ActualCandidates
 ON #V_ActualCandidates

@@ -12,14 +12,13 @@ Reporte operativo y de UI para revisar el estado del tracking FSB y su relacion 
 ## Comportamiento general
 
 1. Resuelve la promocion FSB activa.
-2. Si recibe `@SponsorID`, ejecuta antes:
-   - `dbo.FSBTrackings_Load`
-   - `dbo.FSBCommission_Generate`
-3. Parte desde `dbo.FSBTrackings`.
-4. Une informacion de `FIRST` y luego agrega `SECOND` sobre la misma fila.
-5. Recalcula renewal valido con la regla de 1 a 44 dias.
-6. Calcula columnas de estado para UI.
-7. Limita la salida visual a `FSBDisplayRank <= 2` por grupo.
+2. No ejecuta `dbo.FSBTrackings_Load`, `dbo.FSBCommission_Generate` ni `dbo.FSBCommission_Apply`.
+3. Lee los trackings y comisiones que ya fueron cargados y generados por el proceso operativo.
+4. Parte desde `dbo.FSBTrackings`.
+5. Une informacion de `FIRST` y luego agrega `SECOND` sobre la misma fila.
+6. Recalcula renewal valido con la regla de 1 a 44 dias.
+7. Calcula columnas de estado para UI.
+8. Limita la salida visual a `FSBDisplayRank <= 2` por grupo.
 
 ## Base de la fila
 

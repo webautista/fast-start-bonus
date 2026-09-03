@@ -11,28 +11,34 @@ Procedimiento principal de carga masiva para FastStartBonus. Construye el univer
 
 ## Flujo implementado
 
-1. Abre transaccion y toma `sp_getapplock` por promocion.
+1. Toma `sp_getapplock` antes de preparar datos sobre `FSB_Flow_<PromotionID>`: `Shared` con sponsor y `Exclusive` para la promocion completa; con sponsor tambien toma un lock `Exclusive` especifico del sponsor.
 2. Valida que `@PromotionID` exista.
 3. Construye `#ScopeSponsors` con sponsors que tienen ciclo FSB cargado.
 4. Construye `#Universe` con el universo completo de ordenes:
    - `PROMOTER`: ordenes de promoters hijos del sponsor.
    - `CUSTOMER`: ordenes de customers asociados al sponsor por `SponsorMemberID`.
-5. Persiste `#Universe` en `dbo.FSBCandidates`.
-6. Construye `#BaseOrders` desde `dbo.FSBCandidates` usando solo `IsStaticEligible = 1`.
-7. Deduplica para clasificacion:
+5. Construye `#BaseOrders` desde `#Universe` usando solo `IsStaticEligible = 1`.
+6. Deduplica para clasificacion:
    - una orden por promoter
    - una orden por customer
-8. Evalua ventanas dinamicas:
+7. Evalua ventanas dinamicas:
    - `FSB1`
    - `FSB1_EXT`
    - `FSB2`
    - `FSB3`
-9. Inserta tambien `NO_FSB` para los candidatos elegibles que no entraron a un FSB valido.
-10. Resuelve `FirstRPHID` y `SecondRPHID`.
+8. Inserta tambien `NO_FSB` para los candidatos elegibles que no entraron a un FSB valido.
+9. Resuelve `FirstRPHID` y `SecondRPHID`.
+10. Abre una transaccion corta para persistir candidatos y tracking:
+    - persiste `#Universe` en `dbo.FSBCandidates` mediante `UPDATE + INSERT`
+    - conserva `UPDLOCK, HOLDLOCK` solo para proteger el `NOT EXISTS` de candidatos
 11. Refresca `dbo.FSBTrackings`:
-   - elimina filas obsoletas en el scope
-   - inserta filas nuevas
-   - actualiza payload si cambio
+    - elimina filas obsoletas en el scope
+    - inserta filas nuevas
+    - actualiza payload si cambio
+
+12. Ejecuta automaticamente `dbo.FSBCommission_Generate` dentro de la misma transaccion, con el mismo `@PromotionID` y `@SponsorID`; el `COMMIT` ocurre despues de ambos procesos. Los reportes no ejecutan ninguno de estos procesos.
+
+La transaccion corta comienza despues de construir la clasificacion y los renewals del loader. `FSBCommission_Generate` aun prepara sus propios calculos dentro de esa transaccion; separar tambien esa fase requiere un refactor adicional del generador.
 
 ## Universo de candidatos
 
@@ -67,6 +73,7 @@ La clave negativa permite mantener una sola logica de ventanas y conteos para pr
 - `IsStaticEligible`
 - `StaticEligibilityReason`
 - `IsExcludedProduct`
+- `IsCurrent`, `FirstSeenAt`, `LastSeenAt` e `InactivatedAt`
 
 Ejemplos de descarte:
 
@@ -109,7 +116,8 @@ Ejemplos de descarte:
 
 Despues de correrlo:
 
-- `dbo.FSBCandidates` contiene el universo completo auditado
+- `dbo.FSBCandidates` contiene el universo completo auditado; las filas operativas vigentes se filtran con `IsCurrent = 1`
+- Las filas que dejan de aparecer no se eliminan: quedan con `IsCurrent = 0` e `InactivatedAt` informado
 - `dbo.FSBTrackings` contiene la clasificacion final
 - existen filas `NO_FSB`
 - `CustomerID`, `ParticipantUserID` y `CandidateType` quedan persistidos

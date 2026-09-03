@@ -45,7 +45,7 @@ El script vuelve a reconstruir en memoria la logica esperada de:
 
 ### Universo
 
-Compara esperado vs real en `dbo.FSBCandidates` mediante:
+Compara el universo esperado contra las filas actuales de `dbo.FSBCandidates`, filtradas con `IsCurrent = 1`, mediante:
 
 - `EXPECTED_UNIVERSE_SUMMARY`
 - `ACTUAL_UNIVERSE_SUMMARY`

@@ -38,22 +38,7 @@ BEGIN
         END;
 
         -----------------------------------------------------------------------
-        -- 2. AUTO REFRESH ONLY FOR SPECIFIC SPONSOR
-        -----------------------------------------------------------------------
-
-        IF @SponsorID IS NOT NULL
-        BEGIN
-            EXEC dbo.FSBTrackings_Load
-                @PromotionID = @EffectivePromotionID,
-                @SponsorID = @SponsorID;
-
-            EXEC dbo.FSBCommission_Generate
-                @PromotionID = @EffectivePromotionID,
-                @SponsorID = @SponsorID;
-        END;
-
-        -----------------------------------------------------------------------
-        -- 3. BUILD TRACKING SCREEN ROWS
+        -- 2. BUILD TRACKING SCREEN ROWS
         --
         -- Base = FIRST commission rows only.
         -- SECOND information is joined into the FIRST row.

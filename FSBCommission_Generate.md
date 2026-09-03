@@ -11,15 +11,16 @@ Generar cabeceras y detalles de comision FSB a partir de `dbo.FSBTrackings`, res
 
 ## Flujo implementado
 
-1. Abre transaccion y toma `sp_getapplock` por promocion.
-2. Calcula grupos elegibles de `FIRST` usando `COUNT(DISTINCT ft.PromoterID)`.
-3. Inserta cabeceras `FIRST` faltantes en `dbo.FSBCommission`.
-4. Inserta detalles `FIRST` faltantes en `dbo.FSBCommissionDetail`.
-5. Calcula renewals validos por tracking usando `FirstRPHID` y `SecondRPHID`.
-6. Cuenta renewals validos por grupo `FIRST`.
-7. Calcula elegibilidad de `SECOND`.
-8. Inserta cabeceras `SECOND` faltantes.
-9. Inserta detalles `SECOND` faltantes.
+1. Si se ejecuta solo, abre su propia transaccion. Si lo llama `FSBTrackings_Load`, participa en la transaccion existente.
+2. Toma `sp_getapplock` sobre `FSB_Flow_<PromotionID>`: `Shared` con sponsor y `Exclusive` para la promocion completa; con sponsor tambien toma un lock `Exclusive` especifico del sponsor.
+3. Calcula grupos elegibles de `FIRST` usando `COUNT(DISTINCT ft.PromoterID)`.
+4. Inserta cabeceras `FIRST` faltantes en `dbo.FSBCommission`.
+5. Inserta detalles `FIRST` faltantes en `dbo.FSBCommissionDetail`.
+6. Calcula renewals validos por tracking usando `FirstRPHID` y `SecondRPHID`, sin bloqueo de actualizacion sobre la lectura de `FSBTrackings`.
+7. Cuenta renewals validos por grupo `FIRST`.
+8. Calcula elegibilidad de `SECOND`.
+9. Inserta cabeceras `SECOND` faltantes.
+10. Inserta detalles `SECOND` faltantes.
 
 ## Regla de primera mitad
 
@@ -95,6 +96,7 @@ Para rows `CUSTOMER`, `FSBTrackings_Load` ya persistio una clave sintetica negat
 - No genera comisiones para `NO_FSB`.
 - No crea cabeceras `FSB1_EXT`.
 - No recalcula tracking; asume que `dbo.FSBTrackings` ya fue refrescada.
+- La preparacion de renewals y elegibilidad sigue ocurriendo dentro de su transaccion cuando es llamado por `FSBTrackings_Load`.
 
 ## Dependencias
 
