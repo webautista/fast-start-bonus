@@ -20,10 +20,8 @@ BEGIN
     DECLARE @SponsorLockResource NVARCHAR(255);
     DECLARE @LockMode VARCHAR(10);
 
-    DECLARE @NullDate DATETIME;
     DECLARE @LoadAt DATETIME;
 
-    SET @NullDate = CONVERT(DATETIME, '19000101', 112);
     SET @LoadAt = GETDATE();
     SET @LockResource = 'FSB_Flow_' + CAST(@PromotionID AS NVARCHAR(50));
     SET @LockMode = CASE WHEN @SponsorID IS NULL THEN 'Exclusive' ELSE 'Shared' END;
@@ -86,6 +84,7 @@ BEGIN
         IF OBJECT_ID('tempdb..#SelectedKeys') IS NOT NULL DROP TABLE #SelectedKeys;
         IF OBJECT_ID('tempdb..#OrderIDs') IS NOT NULL DROP TABLE #OrderIDs;
         IF OBJECT_ID('tempdb..#OrderPayments') IS NOT NULL DROP TABLE #OrderPayments;
+        IF OBJECT_ID('tempdb..#TrackingChanges') IS NOT NULL DROP TABLE #TrackingChanges;
 
         -----------------------------------------------------------------------
         -- 1. SCOPE SPONSORS
@@ -1272,13 +1271,21 @@ BEGIN
         -- 13. REFRESH TRACKINGS IN CURRENT SCOPE
         -----------------------------------------------------------------------
 
-        DELETE ft
+        SELECT
+            ft.FSBTrackingID AS PreviousFSBTrackingID,
+            ft.PromotionID,
+            ft.SponsorID,
+            ft.PromoterID,
+            ft.OrderID,
+            ft.SponsorFSB1Start
+        INTO #TrackingChanges
         FROM dbo.FSBTrackings ft
         INNER JOIN #ScopeSponsors scope
             ON scope.PromotionID = ft.PromotionID
            AND scope.SponsorID = ft.SponsorID
            AND scope.SponsorFSB1Start = ft.SponsorFSB1Start
         WHERE ft.PromotionID = @PromotionID
+          AND ft.IsCurrent = 1
           AND NOT EXISTS
           (
               SELECT 1
@@ -1290,6 +1297,16 @@ BEGIN
                 AND c.FSBType = ft.FSBType
                 AND c.SponsorFSB1Start = ft.SponsorFSB1Start
           );
+
+        CREATE UNIQUE CLUSTERED INDEX CX_TrackingChanges
+        ON #TrackingChanges (PreviousFSBTrackingID);
+
+        UPDATE ft
+           SET IsCurrent = 0,
+               InactivatedAt = ISNULL(InactivatedAt, @LoadAt)
+        FROM dbo.FSBTrackings ft
+        INNER JOIN #TrackingChanges changes
+            ON changes.PreviousFSBTrackingID = ft.FSBTrackingID;
 
         -----------------------------------------------------------------------
         -- 13. INSERT TRACKINGS
@@ -1313,7 +1330,11 @@ BEGIN
             SponsorFSB3Start,
             SponsorFSB3End,
             FirstRPHID,
-            SecondRPHID
+            SecondRPHID,
+            IsCurrent,
+            FirstSeenAt,
+            LastSeenAt,
+            InactivatedAt
         )
         SELECT
             c.PromotionID,
@@ -1332,7 +1353,11 @@ BEGIN
             c.SponsorFSB3Start,
             c.SponsorFSB3End,
             op.FirstRPHID,
-            op.SecondRPHID
+            op.SecondRPHID,
+            1,
+            @LoadAt,
+            @LoadAt,
+            NULL
         FROM #Classified c
         LEFT JOIN #OrderPayments op
             ON op.OrderID = c.OrderID
@@ -1364,7 +1389,10 @@ BEGIN
                 SponsorFSB3Start = c.SponsorFSB3Start,
                 SponsorFSB3End = c.SponsorFSB3End,
                 FirstRPHID = op.FirstRPHID,
-                SecondRPHID = op.SecondRPHID
+                SecondRPHID = op.SecondRPHID,
+                IsCurrent = 1,
+                LastSeenAt = @LoadAt,
+                InactivatedAt = NULL
         FROM dbo.FSBTrackings ft
         INNER JOIN #Classified c
             ON c.PromotionID = ft.PromotionID
@@ -1375,24 +1403,38 @@ BEGIN
            AND c.SponsorFSB1Start = ft.SponsorFSB1Start
         LEFT JOIN #OrderPayments op
             ON op.OrderID = ft.OrderID
-        WHERE ft.PromotionID = @PromotionID
-          AND
-          (
-                ISNULL(ft.CustomerID, -1) <> ISNULL(c.CustomerID, -1)
-             OR ISNULL(ft.ParticipantUserID, -1) <> ISNULL(c.ParticipantUserID, -1)
-             OR ISNULL(ft.CandidateType, '') <> ISNULL(c.CandidateType, '')
-             OR ISNULL(ft.SponsorFSB1End, @NullDate) <> ISNULL(c.SponsorFSB1End, @NullDate)
-             OR ISNULL(ft.SponsorFSB1ExtEnd, @NullDate) <> ISNULL(c.SponsorFSB1ExtEnd, @NullDate)
-             OR ISNULL(ft.SponsorFSB2Start, @NullDate) <> ISNULL(c.SponsorFSB2Start, @NullDate)
-             OR ISNULL(ft.SponsorFSB2End, @NullDate) <> ISNULL(c.SponsorFSB2End, @NullDate)
-             OR ISNULL(ft.SponsorFSB3Start, @NullDate) <> ISNULL(c.SponsorFSB3Start, @NullDate)
-             OR ISNULL(ft.SponsorFSB3End, @NullDate) <> ISNULL(c.SponsorFSB3End, @NullDate)
-             OR ISNULL(ft.FirstRPHID, -1) <> ISNULL(op.FirstRPHID, -1)
-             OR ISNULL(ft.SecondRPHID, -1) <> ISNULL(op.SecondRPHID, -1)
-          );
+        WHERE ft.PromotionID = @PromotionID;
 
         -----------------------------------------------------------------------
-        -- 14. GENERATE COMMISSION HEADERS/DETAILS IN THE SAME TRANSACTION
+        -- 15. RECORD TRACKING REPLACEMENTS
+        -----------------------------------------------------------------------
+
+        INSERT INTO dbo.FSBTrackingTransition
+        (
+            CreatedAt,
+            PreviousFSBTrackingID,
+            ReplacementFSBTrackingID,
+            ChangeType
+        )
+        SELECT
+            @LoadAt,
+            changes.PreviousFSBTrackingID,
+            replacement.FSBTrackingID,
+            CASE
+                WHEN replacement.FSBTrackingID IS NULL THEN 'INACTIVATED'
+                ELSE 'REPLACED'
+            END
+        FROM #TrackingChanges changes
+        LEFT JOIN dbo.FSBTrackings replacement
+            ON replacement.PromotionID = changes.PromotionID
+           AND replacement.SponsorID = changes.SponsorID
+           AND replacement.PromoterID = changes.PromoterID
+           AND replacement.OrderID = changes.OrderID
+           AND replacement.SponsorFSB1Start = changes.SponsorFSB1Start
+           AND replacement.IsCurrent = 1;
+
+        -----------------------------------------------------------------------
+        -- 16. GENERATE COMMISSION HEADERS/DETAILS IN THE SAME TRANSACTION
         --
         -- Generate participates in this transaction and does not commit it.
         -----------------------------------------------------------------------

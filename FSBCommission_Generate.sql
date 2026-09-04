@@ -95,6 +95,7 @@ BEGIN
             WHERE ft.PromotionID = @PromotionID
               AND (@SponsorID IS NULL OR ft.SponsorID = @SponsorID)
               AND ft.FSBType IN ('FSB1', 'FSB1_EXT', 'FSB2', 'FSB3')
+              AND ft.IsCurrent = 1
             GROUP BY
                 ft.PromotionID,
                 ft.SponsorID,
@@ -244,8 +245,9 @@ BEGIN
            AND fe.FSBType = fc.FSBType
         INNER JOIN dbo.FSBTrackings ft
             ON ft.PromotionID = fc.PromotionID
-           AND ft.SponsorID = fc.SponsorID
-           AND ft.SponsorFSB1Start = fc.SponsorFSB1Start
+            AND ft.SponsorID = fc.SponsorID
+            AND ft.SponsorFSB1Start = fc.SponsorFSB1Start
+            AND ft.IsCurrent = 1
            AND
            (
                 (fc.FSBType = 'FSB1' AND ft.FSBType = 'FSB1')
@@ -256,9 +258,10 @@ BEGIN
                      SELECT 1
                      FROM dbo.FSBTrackings normal
                      WHERE normal.PromotionID = ft.PromotionID
-                       AND normal.SponsorID = ft.SponsorID
-                       AND normal.SponsorFSB1Start = ft.SponsorFSB1Start
-                       AND normal.FSBType = 'FSB1'
+                        AND normal.SponsorID = ft.SponsorID
+                        AND normal.SponsorFSB1Start = ft.SponsorFSB1Start
+                        AND normal.FSBType = 'FSB1'
+                        AND normal.IsCurrent = 1
                  )
              )
 

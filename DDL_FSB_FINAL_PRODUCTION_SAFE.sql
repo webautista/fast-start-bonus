@@ -229,6 +229,11 @@ BEGIN
         FirstRPHID BIGINT NULL,
         SecondRPHID BIGINT NULL,
 
+        IsCurrent BIT NOT NULL CONSTRAINT DF_FSBTrackings_IsCurrent DEFAULT(1),
+        FirstSeenAt DATETIME NULL,
+        LastSeenAt DATETIME NULL,
+        InactivatedAt DATETIME NULL,
+
         CONSTRAINT PK_FSBTrackings PRIMARY KEY CLUSTERED (FSBTrackingID),
 
         CONSTRAINT CK_FSBTrackings_FSBType
@@ -256,6 +261,29 @@ IF OBJECT_ID('dbo.FSBTrackings', 'U') IS NOT NULL
 BEGIN
     ALTER TABLE dbo.FSBTrackings
     ADD CustomerID BIGINT NULL;
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBTrackings', 'U') IS NOT NULL
+BEGIN
+    IF COL_LENGTH('dbo.FSBTrackings', 'IsCurrent') IS NULL
+        ALTER TABLE dbo.FSBTrackings ADD IsCurrent BIT NOT NULL CONSTRAINT DF_FSBTrackings_IsCurrent DEFAULT(1);
+
+    IF COL_LENGTH('dbo.FSBTrackings', 'FirstSeenAt') IS NULL
+        ALTER TABLE dbo.FSBTrackings ADD FirstSeenAt DATETIME NULL;
+
+    IF COL_LENGTH('dbo.FSBTrackings', 'LastSeenAt') IS NULL
+        ALTER TABLE dbo.FSBTrackings ADD LastSeenAt DATETIME NULL;
+
+    IF COL_LENGTH('dbo.FSBTrackings', 'InactivatedAt') IS NULL
+        ALTER TABLE dbo.FSBTrackings ADD InactivatedAt DATETIME NULL;
+
+    EXEC(N'
+        UPDATE dbo.FSBTrackings
+           SET FirstSeenAt = ISNULL(FirstSeenAt, CreatedAt),
+               LastSeenAt = ISNULL(LastSeenAt, CreatedAt)
+         WHERE FirstSeenAt IS NULL
+            OR LastSeenAt IS NULL;');
 END;
 GO
 
@@ -354,6 +382,110 @@ BEGIN
     FOREIGN KEY (PromotionID)
     REFERENCES dbo.Promotions(PromotionID);
 END;
+GO
+
+-------------------------------------------------------------------------------
+-- 3A. dbo.FSBTrackingTransition
+-- Preserves every relationship between an inactivated tracking and the
+-- tracking that replaced it. ReplacementFSBTrackingID is NULL when the
+-- tracking disappeared without a replacement in the same sponsor cycle.
+-------------------------------------------------------------------------------
+
+IF OBJECT_ID('dbo.FSBTrackingTransition', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.FSBTrackingTransition
+    (
+        FSBTrackingTransitionID BIGINT IDENTITY(1,1) NOT NULL,
+        CreatedAt DATETIME NOT NULL CONSTRAINT DF_FSBTrackingTransition_CreatedAt DEFAULT(GETDATE()),
+        PreviousFSBTrackingID BIGINT NOT NULL,
+        ReplacementFSBTrackingID BIGINT NULL,
+        ChangeType VARCHAR(20) NOT NULL,
+
+        CONSTRAINT PK_FSBTrackingTransition
+        PRIMARY KEY CLUSTERED (FSBTrackingTransitionID),
+
+        CONSTRAINT CK_FSBTrackingTransition_ChangeType
+        CHECK (ChangeType IN ('REPLACED', 'INACTIVATED')),
+
+        CONSTRAINT FK_FSBTrackingTransition_Previous
+        FOREIGN KEY (PreviousFSBTrackingID)
+        REFERENCES dbo.FSBTrackings(FSBTrackingID),
+
+        CONSTRAINT FK_FSBTrackingTransition_Replacement
+        FOREIGN KEY (ReplacementFSBTrackingID)
+        REFERENCES dbo.FSBTrackings(FSBTrackingID)
+    );
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBTrackingTransition', 'U') IS NOT NULL
+   AND NOT EXISTS
+   (
+       SELECT 1
+       FROM sys.indexes
+       WHERE object_id = OBJECT_ID('dbo.FSBTrackingTransition')
+         AND name = 'IX_FSBTrackingTransition_Previous'
+   )
+BEGIN
+    CREATE INDEX IX_FSBTrackingTransition_Previous
+    ON dbo.FSBTrackingTransition (PreviousFSBTrackingID, CreatedAt DESC)
+    INCLUDE (ReplacementFSBTrackingID, ChangeType);
+END;
+GO
+
+IF OBJECT_ID('dbo.FSBTrackingTransition', 'U') IS NOT NULL
+   AND NOT EXISTS
+   (
+       SELECT 1
+       FROM sys.indexes
+       WHERE object_id = OBJECT_ID('dbo.FSBTrackingTransition')
+         AND name = 'IX_FSBTrackingTransition_Replacement'
+   )
+BEGIN
+    CREATE INDEX IX_FSBTrackingTransition_Replacement
+    ON dbo.FSBTrackingTransition (ReplacementFSBTrackingID, CreatedAt DESC)
+    WHERE ReplacementFSBTrackingID IS NOT NULL;
+END;
+GO
+
+-- Backfill the latest relationship that can be inferred for historical rows
+-- created before transition auditing was installed.
+INSERT INTO dbo.FSBTrackingTransition
+(
+    CreatedAt,
+    PreviousFSBTrackingID,
+    ReplacementFSBTrackingID,
+    ChangeType
+)
+SELECT
+    ISNULL(previousTracking.InactivatedAt, ISNULL(previousTracking.LastSeenAt, GETDATE())),
+    previousTracking.FSBTrackingID,
+    replacement.FSBTrackingID,
+    CASE
+        WHEN replacement.FSBTrackingID IS NULL THEN 'INACTIVATED'
+        ELSE 'REPLACED'
+    END
+FROM dbo.FSBTrackings previousTracking
+OUTER APPLY
+(
+    SELECT TOP (1)
+        currentTracking.FSBTrackingID
+    FROM dbo.FSBTrackings currentTracking
+    WHERE currentTracking.PromotionID = previousTracking.PromotionID
+      AND currentTracking.SponsorID = previousTracking.SponsorID
+      AND currentTracking.PromoterID = previousTracking.PromoterID
+      AND currentTracking.OrderID = previousTracking.OrderID
+      AND currentTracking.SponsorFSB1Start = previousTracking.SponsorFSB1Start
+      AND currentTracking.IsCurrent = 1
+    ORDER BY currentTracking.FSBTrackingID DESC
+) replacement
+WHERE previousTracking.IsCurrent = 0
+  AND NOT EXISTS
+  (
+      SELECT 1
+      FROM dbo.FSBTrackingTransition existing
+      WHERE existing.PreviousFSBTrackingID = previousTracking.FSBTrackingID
+  );
 GO
 
 

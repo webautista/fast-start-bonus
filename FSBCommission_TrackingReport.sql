@@ -161,6 +161,7 @@ BEGIN
                 ON rp.[OrderId] = ft.OrderID
 
             WHERE ft.PromotionID = @EffectivePromotionID
+              AND ft.IsCurrent = 1
               AND (firstFc.HalfType IS NULL or firstFc.HalfType = 'FIRST')
               AND (@SponsorID IS NULL OR ft.SponsorID = @SponsorID)
         ),

@@ -1199,7 +1199,8 @@ INNER JOIN #V_ScopeSponsors scope
     ON scope.PromotionID = ft.PromotionID
    AND scope.SponsorID = ft.SponsorID
    AND scope.SponsorFSB1Start = ft.SponsorFSB1Start
-WHERE ft.PromotionID = @PromotionID;
+WHERE ft.PromotionID = @PromotionID
+  AND ft.IsCurrent = 1;
 
 CREATE CLUSTERED INDEX CX_V_ActualTrackings
 ON #V_ActualTrackings
